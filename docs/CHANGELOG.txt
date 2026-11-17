@@ -1,0 +1,64 @@
+CHANGELOG
+=========
+0.1.5 (tester build, Nov 16) - plugin v0.79
+- NEW: restored gib stumps. The game's stump models were turned INWARD before release (only a flat cone shows);
+  turned back out they show torn meat and bone (the neck matches the 2004 store-kiosk attract video).
+  Gore -> "Gib stumps": Original (the cones) / Restored (the developers' stumps as found) / Random variation (a
+  different one each gib: restored, bloodier, slim legs, cone legs, tucked arms). Gore presets set it too.
+  New installer part "stumps": the stump files are BUILT from your own mini.vpp and added next to the originals.
+- FIX: Profiles screen - the stick and D-pad left / right now switch between New / Delete and the profile names.
+
+0.1.4 (release candidate, Nov 15) - plugin v0.75
+- Blood you can now see on environment kills (all tested on the Steam Deck): every casket lid slam, the semi trailer
+  neck press and each kick, the boat propeller and the BB fridge door. These hit effects were in the game files but
+  never showed on PC.
+- Black & white kills / Slaughter mode: the Steam Deck line is NOT fixed yet (see README, Known issues). The 0.1.3
+  note below said it was - that fix did not work.
+- Works with the new Fusion Fix's Options entry if it is installed (Fusion Fix itself: keep the old Widescreen Fix
+  for now, see Known issues).
+- Plugin: crash log shows the module offset; small fixes.
+
+0.1.3 (tester build, Nov 15) - plugin v0.67
+- The two Beta animation switches (2004 dives, rifle door kick) stay off unless their PS2-demo animations are
+  installed (they are not part of this build yet); the menu says so. Before, switching them on could crash.
+- New option, Gameplay -> Score -> "Interrogation kill score": Unchanged / Penalty (original) / No penalty / Bonus.
+- Black & white: separate switches for environment kills and Slaughter mode (HUD & Display).
+- Steam Deck: attempted fix for a thin vertical line in Slaughter mode / black & white kills - did NOT work
+  (see 0.1.4).
+- Prepared for ThirteenAG's new Fusion Fix (stick hook changed, Options entry left to the Fusion Fix if present).
+  The Fusion Fix itself is not tested with Extended Cut yet - keep the old Widescreen Fix for now.
+
+0.1.2 (tester build, Nov 14, 22:30) - replaces every 0.1.1 zip (0.1.1 was updated several times under one
+  name). Same content as the last 0.1.1, with its own version number: installer 0.1.2, plugin v0.62.
+
+0.1.1 (tester build, Nov 14)
+- FIX: the "pictures" part wrote a broken HUD picture bank into mini.vpp - every HUD icon, the crosshair and the
+  menu cursor showed as squares. Fixed; running the installer again repairs an affected mini.vpp by itself.
+- The plugin now installs straight into scripts\ (ExtendedCut.asi, ExtendedCut.ini, ExtendedCut.log). Some ASI
+  Loader versions do not look into folders inside scripts\, so the plugin did not load. An older install in
+  scripts\Extended Cut\ is retired automatically (renamed to .asi.old) and your settings move with it.
+- The plugin runs only once even if two copies are found.
+- The installer also writes its list to scripts\ExtendedCut_install.log (send it with the plugin logs).
+- Fresh install: every button showed "Nothing" (no ExtendedCut.ini yet). The plugin now makes ExtendedCut.ini
+  from ExtendedCut_defaults.ini on the first start = the Xbox-style layout.
+- Extended Menu: long help texts wrap onto more lines instead of running off the screen.
+- Plugin v0.57 -> v0.61 (v0.62 in 0.1.2): "Black & white kill effects" option (also beats other mods that switch it off), fixes for
+  bugs in the original game (big fights could run out of room for objects), always-on flashbacks option.
+- README: Steam Deck section (setup, launch options, controller, recommended performance settings) and a short
+  Costume Launcher guide. install.sh: right-click -> Run In Konsole.
+
+0.1 (tester build)
+- One installer for everything (double-click Install.bat / install.sh): plugin, 4 GB flag, tables, button-icon font,
+  pictures and the blowtorch level edit - all built from your own game files, originals kept, full uninstall.
+- Restored: the cut BLOWTORCH interrogation in Chop Shop (all its animations, cameras and the torch were in the game;
+  only the hotspot was never placed), the TIKI TORCH impale's missing animation links, the EARLY DEVELOPMENT HUD
+  (our own recreation of the 2004 dev screenshots: skull, blue health, slaughter bar, brackets, stone weapon icons).
+- First public release. Controller support like the Xbox version (console-style interrogations, button prompts in
+  Xbox / PlayStation / Steam Deck / keyboard style, rumble, remapping, hostage buttons).
+- Extended Menu (Start, then Y) with Controller, Buttons, Extended Cut, Restored, Developer, Display and Gore pages.
+- Gore options: exploding heads (Always / Random / Off), gunfire head gibs, blood on clothes, per-kill wound marks,
+  bullet-hit blood, floor / wall blood that stays, raised engine gore limits, decal memory leak fixed.
+- Restored: pistol "break neck" quick kill, slaughter quick kill 14 blood effect, 2004 beta HUD / dives / kick
+  options, the PC demo's controller layout picture, developer console switches, photo mode.
+- No patched pun.exe needed any more: the plugin makes its game changes in memory (only the optional 4 GB flag
+  touches the file).

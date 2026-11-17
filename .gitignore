@@ -1,0 +1,22 @@
+# Never publish game files, game-derived data or build output
+*.vpp
+*.exe
+*.dll
+*.asi
+*.pdb
+*.ceg
+*.rxm
+*.rfl
+*.tbl
+*.xbe
+*.iso
+*.bin
+*.dds
+*.tga
+*.zip
+*.log
+*.ec_original
+*.patch.json
+package/
+build/
+__pycache__/

@@ -1,0 +1,7 @@
+#!/bin/sh
+# The Punisher: Extended Cut - uninstaller for the Steam Deck / Linux (put this folder inside your game folder,
+# next to pun.exe; in Desktop Mode right-click this file -> Run In Konsole)
+cd "$(dirname "$0")"
+python3 ec_install.py uninstall "$(pwd)/.."
+echo
+printf 'Press Enter to close. '; read x

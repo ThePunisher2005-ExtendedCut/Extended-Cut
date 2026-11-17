@@ -1,0 +1,12 @@
+CREDITS - The Punisher: Extended Cut
+====================================
+Made by: <your name / handle>
+
+Thanks to
+- ThirteenAG - Ultimate ASI Loader, The Punisher Widescreen Fix, d3d8 wrapper.
+- SDL3 (Simple DirectMedia Layer) - controller support. zlib licence: see SDL3_LICENSE.txt.
+- The makers of the earlier Punisher gore patch and of the original costume manager. <names to add>
+- ermaccer - Punisher Menu / Punisher Plugin research. <check whether anything of his is used; else remove>
+- Everyone who documented this game before us.
+
+Fan-made, not affiliated with or endorsed by Marvel, Disney, THQ or Volition. All trademarks belong to their owners.
