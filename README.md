@@ -1,37 +1,98 @@
 # The Punisher: Extended Cut
 
-A fan mod for **The Punisher (2005, PC)** - also plays on the Steam Deck (Proton).
+A fan mod for **The Punisher (2005, PC)** - on **Windows** and on the **Steam Deck / Linux** (Proton).
+One download works on both.
 
 - **Console-style controller support** (Xbox / PlayStation / Steam Deck button prompts, analog interrogations)
 - **Restored cut content** - e.g. the cut Chop Shop blowtorch interrogation, the tiki torch impale, the developers'
   own torn gib stumps (shipped turned inward), early-development HUD
 - **Gore and engine fixes** - more blood options, raised engine limits, retail bug fixes
-- An in-game **Extended menu** for every option
+- An in-game **Extended menu** for every option (pause with Start, then press Y)
 
-> **Pre-release / tester builds.** Things may break - please report what you find (see *Feedback* below).
+> **Pre-release / tester builds.** Things may break - please report what you find (see *Something went wrong?*).
 
-## Download
+**No game files are included.** You need your own copy of the game. The installer changes **your own** files: it
+checks every file first, keeps each original as `<file>.ec_original`, and leaves alone anything it does not
+recognise. Uninstall puts every original back.
 
-Get the latest zip from **[Releases](../../releases)** (tester builds are marked *Pre-release*).
+---
 
-## Install
+## Before you start (everyone)
 
-1. Unzip the release **into your game folder** (the one with `pun.exe`).
-2. Run `Install.exe` (Windows / Steam Deck via Proton) - or `Install.bat` / `install.sh` with Python 3.
-3. Read the list it prints: every line says what was changed or why something was left alone.
+You need these in your game folder (the folder with `pun.exe`) **before** installing Extended Cut:
 
-`Uninstall` puts every original file back. Full guide: [docs/README.txt](docs/README.txt).
+1. **The Punisher (PC)**, installed.
+2. **Gore Patch 3.7 (US version)** - see PCGamingWiki, *The Punisher (2005)*, Essential improvements.
+   Extended Cut needs the `pun.exe` it brings.
+3. **ThirteenAG's Widescreen Fix for The Punisher** - it brings the *Ultimate ASI Loader* (`dinput8.dll`) that
+   starts the mod.
 
-## No game files
+Then download the latest zip from **[Releases](../../releases)** (tester builds are marked *Pre-release*).
 
-This mod ships **no game files**. The installer changes **your own** copy of the game: every file is checked
-first, the original is saved as `<file>.ec_original`, and anything it does not recognise is left alone.
+---
 
-## Feedback
+## Install on Windows
 
-Open an **[Issue](../../issues)** - one per problem, please. Attach from your game's `scripts` folder:
-`ExtendedCut.log`, `ExtendedCut_install.log` and (if there is one) `ExtendedCut_crash.log`, and say which build
-you use (the first line of `ExtendedCut.log`).
+1. **Unzip** the download. You get a folder called `ExtendedCut_<version>`.
+2. **Move that whole folder into your game folder**, so it sits next to `pun.exe`:
+   `...\The Punisher\ExtendedCut_<version>\Install.exe`
+3. **Double-click `Install.exe`** and type **1** (Install), then Enter.
+   - Windows SmartScreen may say *"Windows protected your PC"*: click **More info** -> **Run anyway**.
+     (`CHECKSUMS.txt` lists the file's SHA-256 if you want to check it. No .exe wanted? Use `Install.bat` -
+     it needs Python 3.)
+4. **Read the list it prints.** Every line says what was changed, or why something was left alone.
+5. Start the game. Pause (Start / Esc) - the hint at the bottom shows how to open the **Extended menu**.
+
+**Uninstall:** run `Install.exe` again and type **3**.
+
+---
+
+## Install on the Steam Deck / Linux
+
+Do all of this in **Desktop Mode** (Steam button -> Power -> Switch to Desktop), with the game closed.
+
+1. **Unzip** the download (Dolphin file manager: right-click the zip -> *Extract* -> *Extract archive here*).
+2. **Move the `ExtendedCut_<version>` folder into your game folder**, next to `pun.exe`
+   (e.g. `/home/deck/Games/The Punisher (PC)/ExtendedCut_<version>/`).
+3. Open that folder, **right-click `install.sh` -> Run In Konsole**.
+   (Double-clicking it may only open it as text. Python 3 is already on the Deck.)
+4. **Read the list it prints**, then press Enter to close the window.
+5. **Steam setup - only once:**
+   1. Steam -> Games -> *Add a Non-Steam Game to My Library...* -> Browse -> `pun.exe` in your game folder.
+   2. Right-click the new entry -> **Properties**.
+   3. **Compatibility:** tick *Force the use of a specific Steam Play compatibility tool* and pick a Proton
+      (tested with GE-Proton).
+   4. **Launch Options** - paste this exact line (the mod does not start without it):
+
+      ```
+      WINEDLLOVERRIDES="dinput8,d3d8,SDL3=n,b" %command%
+      ```
+
+   5. Controller: keep Steam Input **on** with a layout that keeps the **trackpads as mouse**
+      (e.g. *Gamepad with Mouse Trackpad*).
+6. Back to Gaming Mode and play. In game: press **Start**, then **Y** for the Extended menu.
+
+**Uninstall:** Desktop Mode -> right-click `uninstall.sh` -> Run In Konsole.
+
+The full Steam Deck guide (performance settings, the Costume Launcher line, logs) is in
+[docs/README.txt](docs/README.txt), section 5.
+
+---
+
+## Something went wrong?
+
+| What you see | What to do |
+|---|---|
+| A line says a file **"does not fit"** | That file is not the version the mod expects (another mod, or no Gore Patch 3.7). That part was skipped, nothing was changed. Send us the whole list. |
+| **No Extended menu** / no `ExtendedCut.log` in `scripts` | Windows: the Widescreen Fix (ASI loader) is missing. Steam Deck: the Launch Options line is missing or mistyped. |
+| The game will not start after installing | Run the installer again and choose Uninstall (3) - every original comes back - then tell us. |
+| Running the installer twice | Safe. Finished parts just say *already installed*. |
+
+**Report a problem:** open an **[Issue](../../issues)** - one per problem, please. Attach from your game's
+`scripts` folder: `ExtendedCut.log`, `ExtendedCut_install.log` and (if there is one) `ExtendedCut_crash.log`.
+The first line of `ExtendedCut.log` says which build you have.
+
+---
 
 ## Building the plugin
 

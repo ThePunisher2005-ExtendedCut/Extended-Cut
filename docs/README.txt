@@ -1,4 +1,4 @@
-THE PUNISHER: EXTENDED CUT  -  version 0.1.4 (RELEASE CANDIDATE - tester build, please do not share)
+THE PUNISHER: EXTENDED CUT  -  player guide (your version: see CHANGELOG.txt and the first line of ExtendedCut.log)
 ==================================================================================
 A mod for The Punisher (2005, PC): console-style controller support, restored cut content (the blowtorch
 interrogation, the tiki torch impale, the early development HUD and more), gore options and photo mode.
@@ -183,7 +183,8 @@ guide ("README - How to use.txt"); this is the short version.
 6g. Together with Extended Cut
    Install / Apply in any order. After you replace a level file by hand (a test file), press Apply once more so
    your costume goes back into it.
-   Settings -> "Smooth blacks": KEEP IT OFF (heavy levels such as Chop Shop can hang on loading with it).
+   Settings -> "Smooth blacks": fine with Extended Cut 0.1.6 or newer (its 128 MB level memory makes room - tested in
+   every heavy level). With an older Extended Cut or without it, keep it OFF (heavy levels can hang on loading).
    NEVER use the launcher's command-line "restore-all": it puts back whole level files from its first backups
    and would undo Extended Cut's level changes (e.g. the blowtorch interrogation).
    Problems: send launcher.log from the launcher folder (and launcher_error.txt if there is one).
