@@ -2,7 +2,7 @@
 rem ---------------------------------------------------------------------------
 rem  Extended Cut plugin - command-line build (Release, x86)
 rem  Same compiler / linker flags as the Visual Studio project
-rem  (the original Visual Studio project, Release|Win32).
+rem  (Downloads\PunisherPad\PunisherPad\PunisherPad.vcxproj, Release|Win32).
 rem
 rem  Output:  out\ExtendedCut.asi, out\ExtendedCut.pdb, out\SDL3.dll
 rem  Temp:    out\build\  (object files etc., safe to delete)
@@ -52,7 +52,7 @@ link /NOLOGO /DLL /OUT:"%OUT%\ExtendedCut.asi" /LIBPATH:"%SDL3_DIR%\lib\x86" ^
    SDL3.lib kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ^
    ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib ^
    /MANIFEST /MANIFESTUAC:NO /manifest:embed /manifestinput:"%VCToolsInstallDir%include\manifest\segmentheap.manifest" ^
-   /DEBUG /PDB:"%OUT%\ExtendedCut.pdb" /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG ^
+   /DEBUG /PDB:"%OUT%\ExtendedCut.pdb" /PDBALTPATH:ExtendedCut.pdb /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG ^
    /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"%OBJ%\ExtendedCut.lib" /MACHINE:X86 /SAFESEH ^
    "%OBJ%\ExtendedCut.obj" || goto :fail
 

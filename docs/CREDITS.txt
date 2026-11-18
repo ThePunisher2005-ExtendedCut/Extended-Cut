@@ -2,6 +2,9 @@ CREDITS - The Punisher: Extended Cut
 ====================================
 Made by: The Punisher (2005) Extended Cut
 
+Inspired by
+- V01DXIX - The Punisher Premastered (for PCSX2).
+
 Thanks to
 - ThirteenAG - The Punisher Widescreen Fix, Ultimate ASI Loader and the d3d8 wrapper.
 - ermaccer - Punisher Menu / Punisher Plugin and his research on this game.
