@@ -1230,6 +1230,28 @@ static void InterKillScore()
     if (logged++ < 4) Log("interrogation kill score: multiplier %.1f (%s)", k[g_interKillScore],
                           g_interKillScore == 1 ? "penalty" : g_interKillScore == 2 ? "no points" : "bonus");
 }
+// v0.81 (tester tester): Frank's shadow goes faint with a wide FOV or the camera far back. The shadow draw
+// (FUN_0053EC80, called from the "Render shadows" step of FUN_004A0A10) gives each shadow caster a distance from the
+// camera (FUN_00512C10: camera distance / 0x913514 * 0x91351C - so a wider FOV counts as further away). Below
+// the float at 0x677618 (5.0, only read: 0x53E857 + 0x53EC80) the real shadow (render-to-texture) is drawn; from
+// 0.75 x that it fades into the faint round blob (simple_shadow.tga). [Display] ShadowDistance = that float in m.
+static int g_shadowDist = 12;
+static void ShadowDistFrame()
+{
+    static int state = 0;                                  // 0 = not checked, 1 = ok, 2 = not the US exe value
+    volatile float* p = (volatile float*)0x677618;
+    if (state == 0) {
+        state = (*p == 5.0f) ? 1 : 2;
+        if (state == 2) Log("shadow distance: 0x677618 is %.3f, not the game's 5.0 - left alone", *p);
+    }
+    if (state != 1) return;
+    int d = g_shadowDist < 5 ? 5 : (g_shadowDist > 40 ? 40 : g_shadowDist);
+    if (*p != (float)d) {
+        *p = (float)d;
+        static int logged = 0;
+        if (logged++ < 6) Log("shadow distance: %d m (game 5)", d);
+    }
+}
 static void BwKillByte()
 {
     static int lastK = -1, lastS = -1;
@@ -1270,6 +1292,7 @@ static void DevApply()
         *(volatile BYTE*)0x7369D0 = (BYTE)(g_devHudMap ? 1 : 0);
         if (g_devForceBW) *(volatile BYTE*)0x70E231 = 1;
         InterKillScore();                                  // v0.66
+        ShadowDistFrame();                                 // v0.81
         BwKillByte();                                      // v0.63: kills / Slaughter mode switches (v0.60: beats PunisherPlugin)
         if (g_devHudMap) {
             // v0.50.5: the map's place / size (0x7369AC..0x7369C8) is set by an Xbox init function (0x9ABD0) that the PC
@@ -3314,6 +3337,26 @@ static int __cdecl HudText(int x, int y, const char* text, int font, DWORD sx, D
     }
     return ((Text_t)0x5186B0)(x, y, text, font, sx, sy);
 }
+// v0.82 (tester, 1080p+): captions / subtitles were cut off with HUD size above 100 %. The HUD clips some pieces
+// with the viewport set by 0x510870(x, y, w, h) (speaker caption box 0x466AD0, typed-out subtitles 0x46C210 /
+// 0x46C7B0, bar fills 0x46A4D0, map 0x466350 ...): the text was enlarged, the clip area was not. While the HUD
+// scales, a clip area smaller than 60 % of the screen is enlarged with the same anchor as its pieces. Full-screen
+// resets (wider / taller than 60 %) pass unchanged.
+typedef void (__cdecl* Viewport_t)(int, int, int, int);
+static DWORD g_hudClips = 0;
+static void __cdecl HudViewport(int x, int y, int w, int h)
+{
+    float ax, ay;
+    if (g_hudScaling && w > 0 && h > 0 && HudAnchor((float)x, (float)y, (float)w, (float)h, &ax, &ay)) {
+        ++g_hudClips;
+        float k = g_hudK;
+        int nx = HudRound(ax + (x - ax) * k), ny = HudRound(ay + (y - ay) * k);
+        int nx1 = HudRound(ax + (x + w - ax) * k), ny1 = HudRound(ay + (y + h - ay) * k);
+        x = nx; y = ny; w = nx1 - nx; h = ny1 - ny;
+        if (w < 1) w = 1; if (h < 1) h = 1;
+    }
+    ((Viewport_t)0x510870)(x, y, w, h);
+}
 static void AchFrame();
 static int __cdecl Hook_HudRender(DWORD player)          // 0x45DA12 -> 0x465530 (the whole HUD)
 {
@@ -3323,8 +3366,8 @@ static int __cdecl Hook_HudRender(DWORD player)          // 0x45DA12 -> 0x465530
     int r = ((int (__cdecl*)(DWORD))0x465530)(player);
     g_hudScaling = 0;
     if (!g_photo) { __try { AchFrame(); } __except (1) {} }   // v0.68: achievements in levels
-    if (k != 1.0f && ++g_hudFrames == 300) Log("hud size: x%.2f, %lu pieces scaled in 300 frames, %d groups last frame",
-                                              k, g_hudPieces, g_hudGroupN);
+    if (k != 1.0f && ++g_hudFrames == 300) Log("hud size: x%.2f, %lu pieces + %lu clip areas scaled in 300 frames, %d groups last frame",
+                                              k, g_hudPieces, g_hudClips, g_hudGroupN);
     return r;
 }
 
@@ -5313,6 +5356,7 @@ static void InstallBeta(const char* ini)
         g_fakeStickTest   = (int)GetPrivateProfileIntA("Developer", "FakeStickTest", 0, ini);   // 1 = start after 8 s, N > 1 = after N s
         g_bwFilter        = GetPrivateProfileIntA("Display", "BlackWhite", 1, ini) ? 1 : 0;
         g_bwSlaughter     = GetPrivateProfileIntA("Display", "BlackWhiteSlaughter", 1, ini) ? 1 : 0;
+        g_shadowDist      = (int)GetPrivateProfileIntA("Display", "ShadowDistance", 12, ini);   // v0.81
 #ifdef EC_RELEASE
         g_achOn           = 0;                                  // release: achievements are not part of this release
 #else
@@ -5418,6 +5462,44 @@ static void LogPlayerPosition()
     ++g_posLogCount;
     Log("position #%d: pos %.3f %.3f %.3f | rot %.3f %.3f %.3f  %.3f %.3f %.3f  %.3f %.3f %.3f",
         g_posLogCount, p[0], p[1], p[2], r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]);
+    // v0.80: also list the kill spots (Environment_Action, event type 0x33) the game created in this level, nearest
+    // first - shows whether a spot added to a level file was loaded at all (Meat1 hook test)
+    __try {
+        int n = *(volatile int*)0x7EEED8;
+        if (n < 0 || n > 8192) { Log("  kill spots: event list not readable"); return; }
+        struct S { float d; DWORD ev; float x, y, z; int used, mx; } best[8]; int nb = 0, total = 0;
+        for (int i = 0; i < n; ++i) {
+            DWORD ev = ((volatile DWORD*)0x7EEEDC)[i];
+            if (!ev || *(volatile int*)(ev + 0x48) != 0x33) continue;
+            ++total;
+            // the spot's position is at +0x7C (glow code 0x46AEA0 compares it with the player's +0x1C)
+            float x = *(volatile float*)(ev + 0x7C), y = *(volatile float*)(ev + 0x80), z = *(volatile float*)(ev + 0x84);
+            float d = sqrtf((x - p[0]) * (x - p[0]) + (y - p[1]) * (y - p[1]) + (z - p[2]) * (z - p[2]));
+            S s = { d, ev, x, y, z, *(volatile int*)(ev + 0x58), *(volatile int*)(ev + 0x54) };
+            int k = nb < 8 ? nb++ : 7;
+            if (k == 7 && nb == 8 && best[7].d <= d) continue;
+            best[k] = s;
+            for (; k > 0 && best[k].d < best[k - 1].d; --k) { S t = best[k]; best[k] = best[k - 1]; best[k - 1] = t; }
+        }
+        Log("  kill spots in this level: %d%s", total, total ? " - nearest:" : "");
+        typedef DWORD(__cdecl* EvFromHandle_t)(DWORD);
+        for (int i = 0; i < nb; ++i) {
+            // trigger zones that list this spot (glow 0x46AEA0 needs one that is on (+0x258 bit 0) with the player in it)
+            int zones = 0, on = 0;
+            DWORD tr = *(volatile DWORD*)(0x7EFA08 + 0x238);
+            for (int guard = 0; tr && tr != 0x7EFA08 && guard < 8192; ++guard, tr = *(volatile DWORD*)(tr + 0x238)) {
+                int nl = *(volatile int*)(tr + 0x270); DWORD links = *(volatile DWORD*)(tr + 0x26C);
+                for (int j = 0; j < nl && j < 64 && links; ++j) {
+                    if (((volatile DWORD*)links)[j * 2 + 1] != 0) continue;
+                    if (((EvFromHandle_t)0x4EF5C0)(((volatile DWORD*)links)[j * 2]) == best[i].ev) {
+                        ++zones; if (*(volatile BYTE*)(tr + 0x258) & 1) ++on; break;
+                    }
+                }
+            }
+            Log("    %.1f m  at %.2f %.2f %.2f  (used %d of %d)  trigger zones %d, on %d", best[i].d, best[i].x, best[i].y,
+                best[i].z, best[i].used, best[i].mx, zones, on);
+        }
+    } __except (1) { Log("  kill spots: could not be read"); }
 }
 
 // v0.49.6: "Save position" / "Load position" (Developer page) - skip the walk to a test spot. Same level only.
@@ -5786,7 +5868,8 @@ static const EnhItem kEnh[] = {
     { 3, "Screen", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
     { 3, "Black & white kill effects", EK_TOGGLE, &g_bwFilter, 0, 1, 1, 0, "Display", "BlackWhite", "On = the game's black & white screen when an environment interrogation kills. Off = in colour. Works right away" },
     { 3, "Black & white Slaughter mode", EK_TOGGLE, &g_bwSlaughter, 0, 1, 1, 0, "Display", "BlackWhiteSlaughter", "On = Slaughter mode turns the screen black & white (the game's look). Off = in colour. Works right away" },
-    { 3, "Level memory MB (restart)", EK_INT, &g_levelPoolMB, 0, 256, 32, 0, "Settings", "LevelPoolMB", "0 = the game's 32.5 MB per level. More = room for smooth blacks / HD textures (a level that does not fit hangs on loading). Try 128. Used the next time the game starts" },
+    { 3, "Shadow distance (m)",   EK_INT, &g_shadowDist, 5, 40, 1, 0, "Display", "ShadowDistance", "How far from the camera Frank and others get a real shadow (further = the faint round one). Game = 5. Raise it for a wide FOV or a far camera. Works right away" },
+    { 3, "Level memory MB (restart)", EK_INT, &g_levelPoolMB, 0, 256, 32, 0, "Settings", "LevelPoolMB", "0 = the game's 32.5 MB per level. More = room for smooth blacks / HD textures (a level that does not fit hangs on loading). Default 128. Used the next time the game starts" },
     { 3, "Windowed (restart)",    EK_TOGGLE, &g_windowed, 0, 1, 1, 0, "Display", "Windowed", "Run in a window instead of full screen (the PC demo 1.00 had it). Not for the Steam Deck. Used the next time the game starts" },
     { 3, "Resolution (restart)",  EK_INT, &g_resIdx, 0, 10, 1, 0, "Display", "Resolution", "Saved to the Widescreen Fix ini. Used the next time the game starts" },
     { 4, "Restart the game after a change", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
@@ -7036,6 +7119,7 @@ static void InstallHudScale()
     PatchCallsTo(0x401000, 0x5EB000, 0x510C80, (void*)HudPic80, "picture draw (HUD size)");
     PatchCallsTo(0x401000, 0x5EB000, 0x510C20, (void*)HudPic20, "stretched picture draw (HUD size)");
     PatchCallsTo(0x401000, 0x5EB000, 0x510BE0, (void*)HudQuad, "quad draw (HUD size)");
+    PatchCallsTo(0x401000, 0x5EB000, 0x510870, (void*)HudViewport, "clip area (HUD size)");   // v0.82
     Log("hud size: %s (k %.2f at start), screen %dx%d", kHudScaleNames[g_hudScaleIdx], HudScaleNow(), *(volatile int*)0x913250, *(volatile int*)0x913254);
 }
 
@@ -7162,7 +7246,7 @@ static void PatchLevelPools(const char* ini)
                                    0x49F65D, 0x49F6CD, 0x52792C };
     static const DWORD perm[15] = { 0x461498, 0x461630, 0x462218, 0x462CAF, 0x49F12D, 0x4F885C, 0x50CB06, 0x50F29B, 0x50F303,
                                     0x50FD14, 0x518E8D, 0x524650, 0x524703, 0x5248A2, 0x5F31E4 };
-    int mb = (int)GetPrivateProfileIntA("Settings", "LevelPoolMB", 0, ini);
+    int mb = (int)GetPrivateProfileIntA("Settings", "LevelPoolMB", 128, ini);   // v0.80: 128 MB by default (Deck: smooth blacks in every heavy level)
     g_levelPoolMB = mb < 0 ? 0 : (mb > 256 ? 256 : mb);
     if (mb > 0) {
         if (mb > 256) mb = 256;
@@ -7365,7 +7449,7 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
         if (char* s = strrchr(g_dir, '\\')) *s = 0;
         char logPath[MAX_PATH]; snprintf(logPath, sizeof(logPath), "%s\\ExtendedCut.log", g_dir);
         g_log = fopen(logPath, "w");
-        Log("The Punisher: Extended Cut v0.79%s loading (%s)", kBuildKind, g_dir);
+        Log("The Punisher: Extended Cut v0.82%s loading (%s)", kBuildKind, g_dir);
         {   // v0.50.4: hang reporter (needs a real handle of this = the game's main thread)
             HANDLE h = nullptr;
             if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,

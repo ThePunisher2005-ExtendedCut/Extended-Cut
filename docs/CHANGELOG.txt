@@ -1,5 +1,27 @@
 CHANGELOG
 =========
+0.1.8 (tester build, Nov 17) - plugin v0.82
+- FIX: on 1080p and bigger screens (HUD size Auto or any size above 100 %) the captions, subtitles and some bar
+  fills were cut off - the text grew with the HUD but the box it is drawn in did not. Now both grow together.
+  If anything on the HUD still looks cut or too big: Extended menu -> HUD & Display -> HUD size (try 150 % or
+  Off = the game's size) and tell us your screen resolution.
+
+0.1.7 (tester build, Nov 17) - plugin v0.81
+- NEW: Extended menu -> HUD & Display -> "Shadow distance (m)". The game only drew the real shadow within 5 m of
+  the camera (a wide FOV counts as further away), so with a big FOV or a far camera Frank's shadow went faint.
+  Default now 12 m (game 5, up to 40). Works right away. Raise it further for a very wide FOV; lower it if a busy
+  room gets slow (enemies in range get real shadows too).
+- Everything from 0.1.6 (level memory 128 MB, blowtorch hand fit, kill spot log).
+
+0.1.6 (tester build, Nov 17) - plugin v0.80
+- Level memory is now 128 MB by default (the game had 32.5 MB per level): room for HD / smooth-black costume
+  textures - every heavy level tested on the Steam Deck. An existing ExtendedCut.ini keeps its own value: set
+  Extended menu -> Settings -> Level memory MB to 128 yourself, then restart the game.
+- Developer mode -> Log my position also lists the kill spots near you (for placing new hotspots).
+- Blowtorch interrogation: the torch now sits in the Punisher's hand. The spot was set by eye before (4.5 cm off);
+  now calculated from the game's own hold animations (Deck-tested). Running the installer again moves it on an
+  existing install.
+
 0.1.5 (tester build, Nov 16) - plugin v0.79
 - NEW: restored gib stumps. The game's stump models were turned INWARD before release (only a flat cone shows);
   turned back out they show torn meat and bone (the neck matches the 2004 store-kiosk attract video).

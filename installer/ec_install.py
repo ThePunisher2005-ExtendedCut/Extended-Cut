@@ -32,7 +32,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
 PKG = os.path.join(HERE, 'package')             # release files sit here (built by make_release.py)
 sys.path.insert(0, HERE)
-VERSION = '0.1.5'
+VERSION = '0.1.8'
 
 
 def sha1(path):
@@ -145,6 +145,24 @@ def part_plugin(game, st, dry):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(s, dst)
             installed(dst, st, game, new=not existed)
+    # 0.1.6: level memory default 0 -> 128 MB. An ExtendedCut.ini from an older version still says 0 (= the old
+    # default) - raise it ONCE; if the player sets 0 again later, it stays 0.
+    ini = find(game, 'scripts/ExtendedCut.ini')
+    if ini and not st.d.get('levelpool_128'):
+        import re
+        txt = open(ini, encoding='latin-1', newline='').read()
+        m = re.search(r'(?m)^LevelPoolMB=0(?=\s|;|$)', txt)
+        if m:
+            if dry:
+                out.append('plugin: level memory would be raised to 128 MB (the new default) in ExtendedCut.ini')
+            else:
+                tmp = ini + '.ec_tmp'
+                open(tmp, 'w', encoding='latin-1', newline='').write(txt[:m.start()] + 'LevelPoolMB=128' + txt[m.end():])
+                os.replace(tmp, ini)
+                st.d['levelpool_128'] = True
+                out.append('plugin: level memory raised to 128 MB (the new default) - Extended menu -> Settings to change it')
+        elif not dry:
+            st.d['levelpool_128'] = True
     return out
 
 
@@ -290,6 +308,19 @@ def part_blowtorch(game, st, dry):
     state = ec_levels.blowtorch_state(cv)
     if state == 'installed':
         return ['blowtorch: already installed']
+    if state == 'refit':                                     # 0.1.6: our older install - torch hand fit
+        if dry:
+            return ['blowtorch: would move the blowtorch spot a few cm (the torch now sits in the hand)']
+        try:
+            data = ec_levels.refit_blowtorch(cv)
+        except Exception as ex:
+            return ['blowtorch: hand fit could not be updated (%s) - left as it was' % ex]
+        backup(cv, st, game)
+        tmp = cv + '.ec_tmp'
+        open(tmp, 'wb').write(data)
+        os.replace(tmp, cv)
+        installed(cv, st, game)
+        return ['blowtorch: spot moved a few cm - the torch now sits in the Punisher\'s hand']
     if state == 'old':
         return ['blowtorch: an older blowtorch restoration is already in Chop1.vpp - left alone']
     if state != 'ready':

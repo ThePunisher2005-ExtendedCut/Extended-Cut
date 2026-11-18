@@ -4,7 +4,8 @@ records; no level data is shipped, only the numbers below (positions, links, nam
 blowtorch (Chop Shop 1): the cut blowtorch interrogation. Every animation, camera and the torch prop ship in the
 retail Chop1.vpp; only the hotspot and its trigger were never placed. Added here:
   - hotspot "blowtorch_interrogation_chop1_a" = a copy of the retail grinder hotspot (chop1_grinder_kill) with room 0,
-    position (8.75, -2.005, 7.5), group "Chop Shop Blow Torch", links = torch camera 0x14000AD, "Blow Torch" prop
+    position (8.782, -2.005, 7.531) (0.1.6: calculated from the hold animations - the Punisher's grip and the torch
+    handle keep one fixed offset; Deck-tested; 0.1.0-0.1.5 used 8.75 / 7.5 by eye = 4.5 cm off), group "Chop Shop Blow Torch", links = torch camera 0x14000AD, "Blow Torch" prop
     0x200024, death camera 0x140010A;
   - trigger "Blowtorch_Interro_Trigger" = a copy of the retail grinder trigger (Trigger Door 013) centred on
     (8.9, 0, 7.5), linking the new hotspot, NOT starting disabled (flag 0x10 cleared; the grinder's waits for the
@@ -28,6 +29,8 @@ GRINDER_HOT, GRINDER_TRG = 0x1400060, 0x80002C
 BT_NAME, BT_TRG_NAME = 'blowtorch_interrogation_chop1_a', 'Blowtorch_Interro_Trigger'
 BT_LINKS = [0x14000AD, 0x200024, 0x140010A]
 TRG_FLAGS_OFF = 63                 # Trigger Door body: u32 flags (0x10 = starts disabled)
+BT_POS = (8.782, -2.005000114440918, 7.531)      # 0.1.6: hand-fit spot (see the top)
+BT_POS_OLD = (8.75, -2.005000114440918, 7.5)    # 0.1.0 - 0.1.5
 SKULL_FILES = (('skull_fish.rxm', 'p_weldingmask.rxm'), ('skull_fish.ceg', 'p_weldingmask.ceg'))
 
 
@@ -46,9 +49,15 @@ def blowtorch_state(chop1_path):
         L = EditableLevel(_get(a, 'Chop1.rfl'))
     except Exception as ex:
         return 'Chop1.vpp could not be read (%s)' % ex
-    names = {r.name for r in _iter(L)}
+    recs = {r.name: r for r in _iter(L)}
+    names = set(recs)
     if BT_NAME in names:
-        return 'installed' if BT_TRG_NAME in names else 'old'
+        if BT_TRG_NAME not in names:
+            return 'old'
+        p = recs[BT_NAME].pos
+        if all(abs(p[k] - BT_POS_OLD[k]) < 1e-3 for k in range(3)):
+            return 'refit'          # ours, older spot -> move it
+        return 'installed'
     try:
         g, t = L.record(GRINDER_HOT), L.record(GRINDER_TRG)
     except Exception:
@@ -62,6 +71,20 @@ def _iter(L):
     """every object record of the level"""
     for o in L.objects.values():
         yield Record(L._data[o['off']:o['off'] + o['size']])
+
+
+def refit_blowtorch(chop1_vpp):
+    """0.1.6: move an already installed blowtorch hotspot from the old spot to BT_POS (nothing else changes)"""
+    a = vpp_pack.read(chop1_vpp)
+    L = EditableLevel(_get(a, 'Chop1.rfl'))
+    hot = next(r for r in _iter(L) if r.name == BT_NAME)
+    hot.pos = BT_POS
+    L.replace(hot)
+    data = L.build()
+    p = EditableLevel(data).record(hot.uid).pos
+    assert all(abs(p[k] - BT_POS[k]) < 1e-4 for k in range(3))
+    vpp_pack.put(a, 'Chop1.rfl', data)
+    return vpp_pack.build(a)
 
 
 def build_blowtorch(chop1_vpp, skull_src_vpps):
@@ -78,7 +101,7 @@ def build_blowtorch(chop1_vpp, skull_src_vpps):
     hot.set_uid(hot_uid)
     hot.set_name(BT_NAME)
     hot.room = 0
-    hot.pos = (8.75, -2.005000114440918, 7.5)
+    hot.pos = BT_POS
     hot.replace_string('Chop Grinder', 'Chop Shop Blow Torch')
     hot.set_links(BT_LINKS)
     L.add(hot)
