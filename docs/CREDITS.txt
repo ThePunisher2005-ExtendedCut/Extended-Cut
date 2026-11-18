@@ -4,6 +4,8 @@ Made by: The Punisher (2005) Extended Cut
 
 Inspired by
 - V01DXIX - The Punisher Premastered (for PCSX2).
+- bl4ckh4nd - his HD texture pack for The Punisher (PCSX2) - and SomberTwilight: they inspired the custom
+  textures and the Costume Launcher.
 
 Thanks to
 - ThirteenAG - The Punisher Widescreen Fix, Ultimate ASI Loader and the d3d8 wrapper.
