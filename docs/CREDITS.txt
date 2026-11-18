@@ -9,6 +9,10 @@ Thanks to
 - ThirteenAG - The Punisher Widescreen Fix, Ultimate ASI Loader and the d3d8 wrapper.
 - ermaccer - Punisher Menu / Punisher Plugin and his research on this game.
 
+Project icon
+- The skull icon is the original Xbox game's icon (The Punisher, 2005 - THQ / Volition), as shared on SteamGridDB
+  by Haxy.
+
 Third-party parts
 - SDL3 (Simple DirectMedia Layer) - controller support. zlib licence: see SDL3_LICENSE.txt.
 
