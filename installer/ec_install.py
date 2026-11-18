@@ -32,7 +32,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
 PKG = os.path.join(HERE, 'package')             # release files sit here (built by make_release.py)
 sys.path.insert(0, HERE)
-VERSION = '0.1.8'
+VERSION = '0.1.9'
 
 
 def sha1(path):

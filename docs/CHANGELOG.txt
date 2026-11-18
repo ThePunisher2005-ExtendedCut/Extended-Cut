@@ -1,5 +1,9 @@
 CHANGELOG
 =========
+0.1.9 (tester / first GitHub pre-release, Nov 17) - plugin v0.82
+- Same game changes as 0.1.8 (no code change). Licence is now the GNU GPL v3.0 or later (LICENSE.txt), credits
+  updated (CREDITS.txt).
+
 0.1.8 (tester build, Nov 17) - plugin v0.82
 - FIX: on 1080p and bigger screens (HUD size Auto or any size above 100 %) the captions, subtitles and some bar
   fills were cut off - the text grew with the HUD but the box it is drawn in did not. Now both grow together.
