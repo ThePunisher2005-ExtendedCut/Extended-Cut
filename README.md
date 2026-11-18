@@ -40,5 +40,7 @@ you use (the first line of `ExtendedCut.log`).
 
 ## Credits and licence
 
-See [docs/CREDITS.txt](docs/CREDITS.txt) and [LICENSE.txt](LICENSE.txt).
+The Extended Cut code and tools are licensed under the **GNU General Public License v3.0 or later** ([LICENSE.txt](LICENSE.txt)): use, change and share them freely - a released mod built on this code must publish its source under the same licence and keep the credits. The licence covers our code only, not the game or its files; Ultimate ASI Loader and SDL3 keep their own licences.
+
+See [docs/CREDITS.txt](docs/CREDITS.txt).
 Fan-made; not affiliated with or endorsed by Marvel, Disney, THQ or Volition. All trademarks belong to their owners.
