@@ -6650,6 +6650,9 @@ static void PaperNotebook(int W, int H)
         Log("options: notebook texture %d (%dx%d)", tex, tw, th);
     }
     if (tex < 0 || tw <= 0 || th <= 0) return;
+    // v0.83 (GitHub #1 log: "notebook texture 1858 (32x32)"): in a level options_bg.tga is NOT loaded - the lookup
+    // gives the game's 32x32 stand-in, which was stretched full screen under the menu. Skip it.
+    if (tw < 128 || th < 128) return;
     int top = H * 66 / 800;                          // the game's title bar stays visible above it
     PaperColor(255, 255, 255, 255);
     // v0.32.9: ending exactly on the last screen row put a half-bright line on screen row 0 - stop 2 px short
@@ -7449,7 +7452,7 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
         if (char* s = strrchr(g_dir, '\\')) *s = 0;
         char logPath[MAX_PATH]; snprintf(logPath, sizeof(logPath), "%s\\ExtendedCut.log", g_dir);
         g_log = fopen(logPath, "w");
-        Log("The Punisher: Extended Cut v0.82%s loading (%s)", kBuildKind, g_dir);
+        Log("The Punisher: Extended Cut v0.83%s loading (%s)", kBuildKind, g_dir);
         {   // v0.50.4: hang reporter (needs a real handle of this = the game's main thread)
             HANDLE h = nullptr;
             if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,

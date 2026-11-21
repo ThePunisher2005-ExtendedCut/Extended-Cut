@@ -1,5 +1,12 @@
 CHANGELOG
 =========
+0.1.10 (hotfix pre-release, Nov 20) - plugin v0.83
+- FIX (GitHub #1): the Extended menu opened from Esc -> Options INSIDE a level could flicker / show a stretched
+  blotch behind it. It drew the main menu's notebook picture, which a level does not load (the game hands back a
+  32x32 stand-in, stretched over the whole screen). That picture is now skipped when it is not loaded.
+- Nothing else changed (same game changes as 0.1.9). To update from 0.1.9: run Install again (it replaces the
+  plugin and keeps your settings).
+
 0.1.9 (tester / first GitHub pre-release, Nov 17) - plugin v0.82
 - Same game changes as 0.1.8 (no code change). Licence is now the GNU GPL v3.0 or later (LICENSE.txt), credits
   updated (CREDITS.txt).
