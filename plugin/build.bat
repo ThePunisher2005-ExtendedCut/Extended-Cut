@@ -2,7 +2,7 @@
 rem ---------------------------------------------------------------------------
 rem  Extended Cut plugin - command-line build (Release, x86)
 rem  Same compiler / linker flags as the Visual Studio project
-rem  (Downloads\PunisherPad\PunisherPad\PunisherPad.vcxproj, Release|Win32).
+rem  (the original Visual Studio project, Release|Win32).
 rem
 rem  Output:  out\ExtendedCut.asi, out\ExtendedCut.pdb, out\SDL3.dll
 rem  Temp:    out\build\  (object files etc., safe to delete)

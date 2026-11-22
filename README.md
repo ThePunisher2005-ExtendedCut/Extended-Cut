@@ -5,9 +5,11 @@ One download works on both.
 
 - **Console-style controller support** (Xbox / PlayStation / Steam Deck button prompts, analog interrogations)
 - **Restored cut content** - e.g. the cut Chop Shop blowtorch interrogation, the tiki torch impale, the developers'
-  own torn gib stumps (shipped turned inward), early-development HUD
+  own torn gib stumps (shipped turned inward), the meat-hook quick kill, early-development HUD
 - **Gore and engine fixes** - more blood options, raised engine limits, retail bug fixes
 - An in-game **Extended menu** for every option (pause with Start, then press Y)
+- **Costumes in game** - switch your own costumes, the outfit (trench coat / T-shirt) and the Colt skin from the
+  Extended menu while you play; costumes are made with the **Costume Launcher** (separate download)
 
 > **Pre-release / tester builds.** Things may break - please report what you find (see *Something went wrong?*).
 

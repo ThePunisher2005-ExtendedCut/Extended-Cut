@@ -44,7 +44,13 @@ What gets installed:
    font       Xbox / PlayStation / Steam Deck button icons for the on-screen prompts (misc.vpp)
    pictures   Xbox / Steam Deck stick pictures, rebuilt icons, 2004 lifebar, early development HUD (mini.vpp)
    blowtorch  the cut blowtorch interrogation in Chop Shop (Chop1.vpp)
+   hooks      the meat-hook quick kill in the Meat Packing Plant (Meat1.vpp, built from your own level files) and
+              the blood drip / pool of the tiki torch kill in the Zoo (zoo1.vpp)
    stumps     the restored gib stumps for Gore -> "Gib stumps" (built from your own mini.vpp; the game's own stay)
+   menuart    the Extended menu's pictures and the main menu's notebook paper (copied from your own game files)
+   blackcolt  the Punisher's own Colt .45 in black, enemies keep the normal one (made from your own Colt texture;
+              Extended menu -> Costume -> Weapon Skin -> Colt .45: 04 Movie)
+   outfits    both Punisher outfits (trench coat + T-shirt) for the outfit switch (copied from your own level files)
 
 If a line says a file "does not fit", that file is different from what this release expects (another mod or
 another game version). That file is left alone - please send the whole list.
@@ -63,11 +69,19 @@ a file since, that file is left alone and the list says so).
 ---------------------------------------------------------------------
 4. IN GAME
 ---------------------------------------------------------------------
-Extended Menu: press Start (pause), then Y. Keyboard: see the hint on the pause screen.
-Tabs (LB / RB): Controls, Gameplay, Gore, HUD & Display, Restored content. LT / RT jump between sections,
-A opens / closes a section. Changes save to scripts\ExtendedCut.ini; X = back to the defaults.
+Extended Menu: press Start (pause), then Y. Or from the in-game menu: Options -> Extended Menu (paper look, like the
+main menu). Keyboard: see the hint on the pause screen; Esc / Backspace close it.
+Tabs (LB / RB): Controls, Gameplay, Gore, HUD & Display, Restored content, Cheats & Debug, Costume. LT / RT jump
+between sections, A opens / closes a section. Changes save to scripts\ExtendedCut.ini; X = back to the default of
+the highlighted setting.
+Costume tab: Outfit (Level's own / Trench coat / T-shirt), Costume (your costumes - he changes at once, even in the
+middle of a level), In-game skulls, Reload costume files, Weapon Skin. Costumes come from the Costume Launcher
+(separate download): its "Send changes to the game" / "Send whole library to the game" buttons put them into
+scripts\Extended Cut\Costumes. The PC version's exclusive T-shirt skins are there as PC Exclusive 1980 / 1990 / 2000.
+Photo mode: L3 + R3 (keyboard: F9, [Photo] Key in the ini).
 Blowtorch: Chop Shop (first level), grab a thug and take him to the welding torch - the skull marks the spot.
 Tiki torch impale: the Zoo's tiki bar torches (environment quick kill).
+Meat hook: Meat Packing Plant, grab a thug and take him to the wall hooks or the hook racks.
 
 ---------------------------------------------------------------------
 5. STEAM DECK
@@ -188,6 +202,11 @@ guide ("README - How to use.txt"); this is the short version.
    NEVER use the launcher's command-line "restore-all": it puts back whole level files from its first backups
    and would undo Extended Cut's level changes (e.g. the blowtorch interrogation).
    Problems: send launcher.log from the launcher folder (and launcher_error.txt if there is one).
+
+6h. Costumes in the game (Costume tab, Extended Cut 0.3.0 + Costume Launcher 1.0)
+   "Send changes to the game" (only what you added or changed) or "Send whole library to the game" writes your kits,
+   costumes and mixes for the in-game picker. In the game: Extended Menu -> Costume -> Costume (the game running:
+   "Reload costume files" first). No Apply and no level files needed for this; Apply still works as before.
 
 ---------------------------------------------------------------------
 7. KNOWN ISSUES

@@ -12,6 +12,14 @@
   pictures mini.vpp: Xbox / Steam Deck stick pictures, rebuilt M16 launcher + target icons, 2004 lifebar and the
            early development HUD (our recreation)
   blowtorch  the cut blowtorch interrogation in Chop Shop 1 (built from your own Chop1.vpp)
+  hooks      the meat-hook quick kill in the Meat Packing Plant (built from your own Meat1.vpp, zoo1.vpp and
+             Mansion3.vpp); 0.3: + the drip / pool effects for the zoo1 tiki torch kill (zoo1.vpp)
+  blackcolt  mini.vpp: the Punisher's own Colt .45 in black (enemies keep the normal Colt), made from your own
+           Colt texture; switch it in game: Extended menu -> Costume -> Weapon Skin -> Colt .45
+  menuart  mini.vpp: the Extended menu's pictures (sidebar skull, torn edge, ink splat, brush bar, notebook paper) copied from your
+           own game files
+  outfits  mini.vpp: both Punisher outfits (trench coat + T-shirt) copied from your own level files, for the outfit
+           switch: Extended menu -> Costume -> Outfit
   stumps   mini.vpp: the restored gib stumps + variants for Gore -> "Gib stumps" (built from your own stump models;
            the game's own stumps stay untouched)
 
@@ -32,7 +40,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
 PKG = os.path.join(HERE, 'package')             # release files sit here (built by make_release.py)
 sys.path.insert(0, HERE)
-VERSION = '0.1.10'
+VERSION = '0.3.0'
 
 
 def sha1(path):
@@ -340,6 +348,58 @@ def part_blowtorch(game, st, dry):
     return ['blowtorch: Chop1.vpp now has the blowtorch interrogation (original saved as Chop1.vpp.ec_original)']
 
 
+def part_hooks(game, st, dry):
+    """0.2: the meat-hook quick kill on the 23 wall hooks of Meat1 (see ec_hooks.py); 0.3: + the hook kill's blood
+    effects for the zoo1 tiki torch kill (zoo1.vpp)"""
+    import ec_hooks
+    mv = find(game, 'dvd_pc/data/shipping/Meat/Meat1.vpp')
+    if mv is None:
+        return ['hooks: dvd_pc/data/shipping/Meat/Meat1.vpp not found']
+    zv, mz = find(game, 'dvd_pc/data/shipping/zoo/zoo1.vpp'), find(game, 'dvd_pc/data/shipping/Mansion/Mansion3.vpp')
+    out = []
+    state = ec_hooks.hooks_state(mv)
+    if state == 'installed':
+        out.append('hooks: already installed')
+    elif state != 'ready':
+        return ['hooks: ' + state + ' - NOT installed (nothing changed)']
+    elif zv is None or mz is None:
+        return ['hooks: zoo1.vpp or Mansion3.vpp not found (the kill and its blood pool come from them) - NOT installed']
+    else:
+        try:
+            data = ec_hooks.build_hooks(mv, zv, mz)
+        except Exception as ex:
+            return ['hooks: could not be built (%s) - NOT installed (nothing changed)' % ex]
+        if dry:
+            out.append('hooks: Meat1.vpp would get the meat-hook quick kill (23 hooks)')
+        else:
+            backup(mv, st, game)
+            tmp = mv + '.ec_tmp'
+            open(tmp, 'wb').write(data)
+            os.replace(tmp, mv)
+            installed(mv, st, game)
+            out.append('hooks: Meat1.vpp now has the meat-hook quick kill (original saved as Meat1.vpp.ec_original)')
+    # 0.3: the tiki kill's blood (drip + pool effects and the pool texture, from Meat1 / Mansion3)
+    if zv is None or mz is None:
+        return out + ['hooks: zoo1.vpp or Mansion3.vpp not found - the tiki kill gets no drip / pool']
+    ts = ec_hooks.tiki_state(zv)
+    if ts == 'installed':
+        return out + ['hooks: zoo1.vpp already has the tiki kill blood']
+    if ts != 'ready':
+        return out + ['hooks: ' + ts + ' - tiki kill blood NOT installed']
+    try:
+        data = ec_hooks.build_tiki(zv, mv, mz)
+    except Exception as ex:
+        return out + ['hooks: tiki kill blood could not be built (%s) - zoo1.vpp not changed' % ex]
+    if dry:
+        return out + ['hooks: zoo1.vpp would get the tiki kill blood (drip + floor pool)']
+    backup(zv, st, game)
+    tmp = zv + '.ec_tmp'
+    open(tmp, 'wb').write(data)
+    os.replace(tmp, zv)
+    installed(zv, st, game)
+    return out + ['hooks: zoo1.vpp now has the tiki kill blood (original saved as zoo1.vpp.ec_original)']
+
+
 def part_stumps(game, st, dry):
     """0.1.5: restored gib stumps + variants, ADDED to the player's own mini.vpp (see ec_stumps.py)"""
     import ec_stumps
@@ -472,8 +532,98 @@ def part_pictures(game, st, dry):
                      'the stick pictures, rebuilt icons and the early development HUD', game, st, dry)
 
 
+def part_blackcolt(game, st, dry):
+    """0.2: the Punisher-only black Colt - 3rd-colt_pun + ws_colt_pun ADDED to the player's own mini.vpp, made from his
+    own Colt texture + our paint data (see ec_blackcolt.py); the plugin switches it on / off (Weapons page)"""
+    import ec_blackcolt
+    vp = find(game, 'dvd_pc/data/mini.vpp')
+    if vp is None:
+        return ['blackcolt: dvd_pc/data/mini.vpp not found']
+    state = ec_blackcolt.state(vp, game)
+    if state == 'installed':
+        return ['blackcolt: already installed']
+    if state == 'tinted':                                   # 0.3: the 0.2 black Colt had green spots in the game
+        if dry:
+            return ['blackcolt: the black Colt in mini.vpp would get true black (no green spots)']
+        data = ec_blackcolt.regrey(vp)
+        backup(vp, st, game)
+        tmp = vp + '.ec_tmp'
+        open(tmp, 'wb').write(data)
+        os.replace(tmp, vp)
+        installed(vp, st, game)
+        return ['blackcolt: the black Colt is now true black (no green spots)']
+    if state != 'ready':
+        return ['blackcolt: ' + state + ' - NOT installed (nothing changed)']
+    try:
+        data, src, n = ec_blackcolt.build(vp, game)
+    except Exception as ex:
+        return ['blackcolt: could not be built (%s) - NOT installed (nothing changed)' % ex]
+    if dry:
+        return ['blackcolt: mini.vpp would get the black Colt for the Punisher (made from %s)' % src]
+    backup(vp, st, game)
+    tmp = vp + '.ec_tmp'
+    open(tmp, 'wb').write(data)
+    os.replace(tmp, vp)
+    installed(vp, st, game)
+    return ['blackcolt: mini.vpp now has the black Colt (%d texture(s), made from your %s; Extended menu -> Costume -> Weapon Skin -> '
+            'Colt .45: 04 Movie)' % (n, src)]
+
+
+def part_menuart(game, st, dry):
+    """1.0: the Extended menu's art (layout B5) - 4 of the game's own menu pictures copied into the player's mini.vpp
+    always_loaded.ceg (see ec_menuart.py). Without it the menu falls back to the plain text layout."""
+    import ec_menuart
+    vp = find(game, 'dvd_pc/data/mini.vpp')
+    if vp is None:
+        return ['menuart: dvd_pc/data/mini.vpp not found']
+    state = ec_menuart.state(vp)
+    if state == 'installed':
+        return ['menuart: already installed']
+    if state != 'ready':
+        return ['menuart: ' + state + ' - NOT installed (nothing changed)']
+    try:
+        data, n = ec_menuart.build(vp, game)
+    except Exception as ex:
+        return ['menuart: could not be built (%s) - NOT installed (nothing changed)' % ex]
+    if dry:
+        return ['menuart: mini.vpp would get the Extended menu pictures (from your own misc.vpp / mini.vpp)']
+    backup(vp, st, game)
+    tmp = vp + '.ec_tmp'
+    open(tmp, 'wb').write(data)
+    os.replace(tmp, vp)
+    installed(vp, st, game)
+    return ['menuart: mini.vpp now has the Extended menu pictures (%d)' % n]
+
+
+def part_outfits(game, st, dry):
+    """0.3: the outfit switch (Extended menu -> Costume -> Outfit) - both Punisher outfits' model, face animations and
+    textures ADDED to the player's own mini.vpp, copied from his own level files (see ec_outfits.py)"""
+    import ec_outfits
+    vp = find(game, 'dvd_pc/data/mini.vpp')
+    if vp is None:
+        return ['outfits: dvd_pc/data/mini.vpp not found']
+    state = ec_outfits.state(vp, game)
+    if state == 'installed':
+        return ['outfits: already installed']
+    if state != 'ready':
+        return ['outfits: ' + state + ' - NOT installed (nothing changed)']
+    try:
+        data, src = ec_outfits.build(vp, game)
+    except Exception as ex:
+        return ['outfits: could not be built (%s) - NOT installed (nothing changed)' % ex]
+    if dry:
+        return ['outfits: mini.vpp would get the trench coat + T-shirt outfits (from your %s)' % src]
+    backup(vp, st, game)
+    tmp = vp + '.ec_tmp'
+    open(tmp, 'wb').write(data)
+    os.replace(tmp, vp)
+    installed(vp, st, game)
+    return ['outfits: mini.vpp now has both outfits (from your %s; Extended menu -> Costume -> Outfit)' % src]
+
+
 PARTS = {'plugin': part_plugin, 'laa': part_laa, 'tables': part_tables, 'font': part_font, 'pictures': part_pictures,
-         'blowtorch': part_blowtorch, 'stumps': part_stumps}
+         'blowtorch': part_blowtorch, 'hooks': part_hooks, 'stumps': part_stumps, 'blackcolt': part_blackcolt,
+         'menuart': part_menuart, 'outfits': part_outfits}
 
 
 def uninstall(game):

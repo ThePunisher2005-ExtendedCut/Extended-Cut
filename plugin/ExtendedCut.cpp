@@ -21,9 +21,11 @@
 #include <intrin.h>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 // ---------------------------------------------------------------- logging
 static char g_dir[MAX_PATH];        // folder of this .asi (ini + log live here)
+static DWORD WINAPI FileInventory(LPVOID);
 static FILE* g_log = nullptr;
 static void Log(const char* fmt, ...)
 {
@@ -72,6 +74,31 @@ static Target ParseTarget(const char* s)
     if (!u[1] && ((u[0] >= 'A' && u[0] <= 'Z') || (u[0] >= '0' && u[0] <= '9'))) { t.kind = T_KEY; t.value = u[0]; return t; }
     Log("ini: unknown key name '%s' (ignored)", s);
     return t;
+}
+
+// v1.13: readable name of an ini binding the action list does not have (e.g. LB=LCTRL -> "Left Ctrl")
+static void TargetText(const Target& t, char* out, int n)
+{
+    if (t.kind == T_MOUSE_BUTTON) { snprintf(out, n, "Mouse button %d", t.value + 1); return; }
+    if (t.kind == T_WHEEL) { snprintf(out, n, "Mouse wheel %s", t.value > 0 ? "up" : "down"); return; }
+    if (t.kind != T_KEY) { snprintf(out, n, "Nothing"); return; }
+    struct { int vk; const char* n; } names[] = {
+        {VK_LCONTROL,"Left Ctrl"},{VK_RCONTROL,"Right Ctrl"},{VK_CONTROL,"Ctrl"},{VK_LSHIFT,"Left Shift"},
+        {VK_RSHIFT,"Right Shift"},{VK_SHIFT,"Shift"},{VK_MENU,"Alt"},{VK_SPACE,"Space"},{VK_RETURN,"Enter"},
+        {VK_ESCAPE,"Escape"},{VK_TAB,"Tab"},{VK_BACK,"Backspace"},{VK_CAPITAL,"Caps Lock"},{VK_UP,"Up arrow"},
+        {VK_DOWN,"Down arrow"},{VK_LEFT,"Left arrow"},{VK_RIGHT,"Right arrow"},{VK_INSERT,"Insert"},
+        {VK_DELETE,"Delete"},{VK_HOME,"Home"},{VK_END,"End"},{VK_PRIOR,"Page Up"},{VK_NEXT,"Page Down"},{VK_PAUSE,"Pause"},
+    };
+    for (auto& k : names) if (k.vk == t.value) { snprintf(out, n, "%s", k.n); return; }
+    if (t.value >= VK_F1 && t.value <= VK_F12) { snprintf(out, n, "F%d", t.value - VK_F1 + 1); return; }
+    if (t.value >= VK_NUMPAD0 && t.value <= VK_NUMPAD9) { snprintf(out, n, "Numpad %d", t.value - VK_NUMPAD0); return; }
+    if ((t.value >= 'A' && t.value <= 'Z') || (t.value >= '0' && t.value <= '9')) { snprintf(out, n, "Key %c", (char)t.value); return; }
+    snprintf(out, n, "Key %02X", t.value);
+}
+static void BindIniHelp(const Target& t, char* out, int n)
+{
+    char k[48]; TargetText(t, k, sizeof(k));
+    snprintf(out, n, "Sends %s (set in ExtendedCut.ini) - left/right picks an action instead", k);
 }
 
 // pad buttons we read (SDL naming: SOUTH = A / Cross, EAST = B / Circle, WEST = X / Square, NORTH = Y / Triangle)
@@ -283,6 +310,29 @@ static bool  g_raw[P_COUNT];         // v0.20: pad buttons before the menu mask 
 static bool  g_padIgnore[P_COUNT];   // v0.20: buttons held when the menu opened/closed - ignored until released
 static bool  g_enhOpen = false;
 static bool  g_photo = false;           // v0.41: photo mode (free camera, frozen game)
+// v1.21: photo mode from the KEYBOARD ([Photo] Key=F9): the key turns it on / off without a controller. While it is on:
+// W A S D move, E / Q up / down, mouse or arrow keys look, Shift fast, Ctrl slow, mouse wheel / Page Up / Page Down
+// zoom, F freeze on / off, Enter save the camera to the log, Backspace (or the key) leave. Esc still pauses.
+static int   g_photoKeyVk = VK_F9;
+// v1.29 (Deck: photo mode -> pause -> Back (in-game menu) = the menu froze, force close): going from the pause screen to
+// the in-game menu un-pauses for an instant, and photo mode put its freeze (time x1000) back on right then. Now photo
+// mode counts as "paused" while the game is paused, a game menu is open, or less than 0.6 s after either.
+static DWORD g_photoPauseSeen = 0;
+static bool  g_menuActiveFwd();
+static bool PhotoHeld()
+{
+    if (*(volatile BYTE*)0x736109 || g_menuActiveFwd()) { g_photoPauseSeen = GetTickCount(); return true; }
+    return GetTickCount() - g_photoPauseSeen < 600;
+}
+static volatile int g_phMx = 0, g_phMy = 0, g_phMw = 0;   // mouse movement collected for the photo camera
+static void EcHookWindow();
+static bool PhotoKey(int vk)
+{
+    if (!vk) return false;
+    HWND w = GetForegroundWindow(); DWORD pid = 0;
+    if (w) GetWindowThreadProcessId(w, &pid);
+    return pid == GetCurrentProcessId() && (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
 static void  PhotoFrame();
 static void  HudToggleFrame();
 // v0.42: Display page - resolution for the next start (written to the widescreen fix's ini)
@@ -299,6 +349,7 @@ static bool  g_showLayout = false;       // v0.33: full-screen controller layout
 static int   g_betaPausePic = 0;         // v0.50.9: [Beta] PauseControllerPicture - the picture IS the plain pause screen
 static bool  g_pausePicLoaded = false;   // v0.50.9: int-pause.peg loaded for the pause screen
 static int   g_betaDigitalAmmo = 0;      // v0.33: [Beta] DigitalAmmo - ammo counter in the unused digital_small font
+static float g_digitalScale = 1.15f;     // v0.88: [Beta] DigitalAmmoScale - size of the digital counters (0 = game's draw)
 static int   g_betaComboHud = 0;         // v0.34: [Beta] ComboHud - 2004 "TOTAL / COMBO / BODY COUNT" score display
 static int   g_betaComboSplash = 1;      // v0.34.5: [Beta] ComboHudSplash - faint black ink bar behind it
 // v0.35: weapon upgrades. The bought upgrades Scope / Silencer / Grenade Launcher / Extended Magazine attach to every
@@ -315,6 +366,7 @@ static bool  Btn(SDL_GamepadButton b) { return g_pad && SDL_GetGamepadButton(g_p
 
 static void PhotoExit();
 extern int g_devLogBones;
+static void BcIconRefresh();   // v0.90 (black Colt HUD pictures)
 static void PadUpdate()
 {
     if (!g_sdlReady) {
@@ -353,8 +405,8 @@ static void PadUpdate()
 
     memset(g_down, 0, sizeof(g_down));
     memset(g_raw, 0, sizeof(g_raw));
-    if (!g_pad && g_photo) PhotoExit();      // v0.50.1: pad gone - leave photo mode (else the game stays frozen)
-    if (!g_pad) { g_rx = g_ry = 0; g_rxLin = g_ryLin = 0; return; }
+    if (!g_pad && g_photo && !g_photoKeyVk) PhotoExit();      // v0.50.1: pad gone - leave photo mode (else the game stays frozen)
+    if (!g_pad) { g_rx = g_ry = 0; g_rxLin = g_ryLin = 0; if (g_photoKeyVk) PhotoFrame(); return; }
 
     g_down[P_SOUTH] = Btn(SDL_GAMEPAD_BUTTON_SOUTH);
     g_down[P_EAST]  = Btn(SDL_GAMEPAD_BUTTON_EAST);
@@ -382,7 +434,7 @@ static void PadUpdate()
         static bool wasDual = false;
         bool dual = PlayerDualWielding();
         if (dual != wasDual) { Log("dual-wield %s", dual ? "on (triggers swapped)" : "off"); wasDual = dual; }
-        if (dual) { bool t = g_down[P_LT]; g_down[P_LT] = g_down[P_RT]; g_down[P_RT] = t; }
+        if (dual && !g_enhOpen) { bool t = g_down[P_LT]; g_down[P_LT] = g_down[P_RT]; g_down[P_RT] = t; }   // v1.09: never in the menu (LT up / RT down)
     }
 
     static bool dumpHeld = false;
@@ -424,7 +476,12 @@ static void PadUpdate()
     if (g_enhOpen) { memset(g_down, 0, sizeof(g_down)); g_rx = g_ry = g_rxLin = g_ryLin = 0; }
     HudToggleFrame();                      // v0.50.5: LB + D-pad = HUD on / off ([Developer] HudToggle)
     PhotoFrame();                         // v0.41: L3 + R3 photo mode (takes the pad while on)
-    if (g_photo) { memset(g_down, 0, sizeof(g_down)); g_rx = g_ry = g_rxLin = g_ryLin = 0; }
+    BcIconRefresh();                      // v0.90: black Colt HUD pictures (every 1.5 s)
+    if (g_photo && !PhotoHeld()) {                        // v1.19: Start still pauses; paused = the menu gets the pad
+        bool st = g_down[P_START];
+        memset(g_down, 0, sizeof(g_down)); g_rx = g_ry = g_rxLin = g_ryLin = 0;
+        g_down[P_START] = st;
+    }
 }
 
 // ---------------------------------------------------------------- v0.41: photo mode
@@ -493,6 +550,7 @@ static void LogPairPlacement(const char* why)
 static float g_photoRot[9];
 static float g_photoPos[3], g_photoYaw = 0, g_photoPitch = 0;
 static bool  g_photoFreeze = true;
+static DWORD g_photoEnt = 0;            // v1.19: the player entity when photo mode started (a new one = level restarted)
 // v0.49 camera tool (altar camera): X = save the camera to the log, D-pad up / down = lens zoom (FOV).
 // FOV: global float 0x61F930 (set from the scene's +0x214, 60.0), copied to the camera block 0x67AEFC at 0x406E63.
 // v0.49.1: the FOV the camera USES is camera +0x214 = 0x67AD64 (0x40741F blends 0x67AEFC -> 0x67AF00 into it);
@@ -522,6 +580,29 @@ static void PhotoPatchApply(bool on)
     }
     FlushInstructionCache(GetCurrentProcess(), (void*)0x405A60, 0x20);
 }
+// v0.87: no crosshair in photo mode. The reticle draw (FUN around 0x4C5CD8) leaves at "je 0x4C6B97" (0x4C5CD2,
+// 0F 84 BF 0E 00 00) when there is no weapon; while photo mode is on that becomes "jmp 0x4C6B97" (E9 C0 0E 00 00 90).
+static BYTE g_photoRetSaved[6]; static bool g_photoRetOn = false;
+static void PhotoReticle(bool hide)
+{
+    BYTE* p = (BYTE*)0x4C5CD2;
+    static const BYTE orig[6] = { 0x0F, 0x84, 0xBF, 0x0E, 0x00, 0x00 };
+    __try {
+        DWORD old;
+        if (hide && !g_photoRetOn) {
+            if (memcmp(p, orig, 6) != 0) { Log("photo mode: reticle code not as expected - crosshair stays"); return; }
+            VirtualProtect(p, 6, PAGE_EXECUTE_READWRITE, &old);
+            memcpy(g_photoRetSaved, p, 6);
+            p[0] = 0xE9; *(DWORD*)(p + 1) = 0x4C6B97 - (0x4C5CD2 + 5); p[5] = 0x90;
+            VirtualProtect(p, 6, old, &old); g_photoRetOn = true;
+        } else if (!hide && g_photoRetOn) {
+            VirtualProtect(p, 6, PAGE_EXECUTE_READWRITE, &old);
+            memcpy(p, g_photoRetSaved, 6);
+            VirtualProtect(p, 6, old, &old); g_photoRetOn = false;
+        }
+        FlushInstructionCache(GetCurrentProcess(), p, 6);
+    } __except (1) { Log("photo mode: reticle patch failed"); }
+}
 static void PhotoBuildRot()
 {
     float cy = cosf(g_photoYaw), sy = sinf(g_photoYaw), cp = cosf(g_photoPitch), sp = sinf(g_photoPitch);
@@ -547,7 +628,9 @@ static void PhotoEnter()
         g_photoYaw = atan2f(rot[6], rot[8]);
         g_photoPitch = asinf(fmaxf(-1.0f, fminf(1.0f, rot[7])));
         PhotoPatchApply(true);
-        g_photo = true; g_photoFreeze = true;
+        PhotoReticle(true);                   // v0.87
+        g_photo = true; g_photoFreeze = true; g_photoEnt = *(volatile DWORD*)0x6B70FC;
+        g_phMx = g_phMy = g_phMw = 0; EcHookWindow();       // v1.21: keyboard / mouse camera
         Log("photo mode on (camera %.2f %.2f %.2f, rot f %.2f %.2f %.2f, FOV %.1f / %.1f, %s)", g_photoPos[0], g_photoPos[1], g_photoPos[2],
             rot[6], rot[7], rot[8], g_photoFovSaved, g_photoFovSaved2, InterrogationActiveForPhoto() ? "during an interrogation" : "not interrogating");
     } __except (1) { Log("photo mode: could not start"); }
@@ -578,6 +661,7 @@ static void PhotoExit()
 {
     __try {
         PhotoPatchApply(false);
+        PhotoReticle(false);                  // v0.87
         if (g_photoFovChanged) { *(volatile float*)0x67AD64 = g_photoFovSaved; *(volatile float*)0x61F930 = g_photoFovSaved2; }
         volatile float* rot = (volatile float*)0x67AB78;
         Log("CAMERA AT EXIT: pos %.3f %.3f %.3f | right %.4f %.4f %.4f | up %.4f %.4f %.4f | forward %.4f %.4f %.4f | FOV %.1f",
@@ -631,11 +715,35 @@ static void PhotoFrame()
     DWORD now = GetTickCount(); float dt = (now - last) / 1000.0f; last = now;
     if (dt > 0.1f) dt = 0.1f;
     bool combo = g_raw[P_L3] && g_raw[P_R3];
+    // v1.19: pause screen + Extended menu allowed in photo mode (Start passes through). While the game is paused the
+    // photo camera takes no input, the game runs at normal speed (the pause stops it) and the HUD flag is lifted; a
+    // level restart / quit (new player entity or no level) ends photo mode. Buttons held when unpausing are ignored.
+    static bool wasPaused = false, bBlock = false;
+    bool paused = PhotoHeld();                               // v1.29: + game menus + 0.6 s after
+    if (g_photo) {
+        DWORD ent = 0; BYTE lvl = 0;
+        __try { ent = *(volatile DWORD*)0x6B70FC; lvl = *(volatile BYTE*)0x759BDC; } __except (1) {}
+        if (ent != g_photoEnt || !(lvl & 1)) { Log("photo mode: the level restarted / ended"); PhotoExit(); comboWas = combo; wasPaused = false; return; }
+    }
+    if (paused) {
+        if (g_photo && !wasPaused) { __try { *(volatile float*)0x6769FC = 1.0f; } __except (1) {} Log("photo mode: game paused (camera input off until you resume)"); }
+        wasPaused = true; comboWas = combo; yWas = g_raw[P_NORTH]; return;
+    }
+    if (wasPaused) { wasPaused = false; bBlock = g_raw[P_EAST]; yWas = g_raw[P_NORTH]; comboWas = combo; }
+    if (bBlock && !g_raw[P_EAST]) bBlock = false;
     if (combo && !comboWas && !g_enhOpen) { if (g_photo) PhotoExit(); else PhotoEnter(); }
     comboWas = combo;
+    static bool kWas = true, fWas = true, eWas = true, bsWas = true;   // v1.21 keyboard (true = wait for a release first)
+    bool kKey = PhotoKey(g_photoKeyVk), kF = PhotoKey('F'), kEnter = PhotoKey(VK_RETURN), kBs = PhotoKey(VK_BACK);
+    bool kToggle = kKey && !kWas, kFreeze = kF && !fWas, kSave = kEnter && !eWas, kLeave = kBs && !bsWas;
+    kWas = kKey; fWas = kF; eWas = kEnter; bsWas = kBs;
+    if (kToggle && !g_enhOpen && (g_photo || (*(volatile BYTE*)0x759BDC & 1))) {
+        if (g_photo) { PhotoExit(); return; }
+        PhotoEnter(); if (g_photo) Log("photo mode: started from the keyboard (W A S D / E Q / mouse, %s or Backspace leaves)", "the key");
+    }
     if (!g_photo) return;
-    if (g_raw[P_EAST] && !combo) { PhotoExit(); return; }
-    if (g_raw[P_NORTH] && !yWas) g_photoFreeze = !g_photoFreeze;
+    if ((g_raw[P_EAST] && !combo && !bBlock) || kLeave) { PhotoExit(); return; }
+    if ((g_raw[P_NORTH] && !yWas) || kFreeze) g_photoFreeze = !g_photoFreeze;
     yWas = g_raw[P_NORTH];
     // v0.49: is something else moving the camera (e.g. an interrogation camera)? compare with what we wrote
     __try {
@@ -651,7 +759,7 @@ static void PhotoFrame()
     } __except (1) {}
     // v0.49: X = save this camera to the log; D-pad up / down = zoom (narrower / wider lens)
     static bool xWas = false;
-    if (g_raw[P_WEST] && !xWas) {
+    if ((g_raw[P_WEST] && !xWas) || kSave) {
         __try {
             volatile float* rot = (volatile float*)0x67AB78;
             DWORD pl = *(volatile DWORD*)0x7CF804;
@@ -667,9 +775,10 @@ static void PhotoFrame()
         if (g_pad) SDL_RumbleGamepad(g_pad, 0x6000, 0x6000, 120);   // a short buzz = saved
     }
     xWas = g_raw[P_WEST];
-    float zoom = (g_raw[P_DUP] ? -1.0f : 0.0f) + (g_raw[P_DDOWN] ? 1.0f : 0.0f);
-    if (zoom != 0.0f) {
-        g_photoFov += zoom * 20.0f * dt;
+    float zoom = (g_raw[P_DUP] || PhotoKey(VK_PRIOR) ? -1.0f : 0.0f) + (g_raw[P_DDOWN] || PhotoKey(VK_NEXT) ? 1.0f : 0.0f);
+    int wheel = g_phMw; g_phMw = 0;                         // v1.21: mouse wheel up = closer (narrower lens)
+    if (zoom != 0.0f || wheel) {
+        g_photoFov += zoom * 20.0f * dt - wheel / 120.0f * 3.0f;
         if (g_photoFov < 10.0f) g_photoFov = 10.0f;
         if (g_photoFov > 90.0f) g_photoFov = 90.0f;
         g_photoFovChanged = true;
@@ -688,10 +797,19 @@ static void PhotoFrame()
     float lx = dz(Axis(SDL_GAMEPAD_AXIS_LEFTX)), ly = dz(Axis(SDL_GAMEPAD_AXIS_LEFTY));
     float rx = dz(Axis(SDL_GAMEPAD_AXIS_RIGHTX)), ry = dz(Axis(SDL_GAMEPAD_AXIS_RIGHTY));
     float lt = Axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER), rt = Axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
-    float speed = g_photoMoveSpeed * (g_raw[P_LB] ? 0.25f : 1.0f) * (g_raw[P_RB] ? 4.0f : 1.0f);
-    float turn = g_photoTurnSpeed * (g_raw[P_LB] ? 0.35f : 1.0f);
+    // v1.21 keyboard + mouse: W A S D / E Q move, arrows + mouse look, Shift fast, Ctrl slow
+    lx += (PhotoKey('D') ? 1.0f : 0.0f) - (PhotoKey('A') ? 1.0f : 0.0f);
+    ly += (PhotoKey('S') ? 1.0f : 0.0f) - (PhotoKey('W') ? 1.0f : 0.0f);
+    rt += PhotoKey('E') ? 1.0f : 0.0f; lt += PhotoKey('Q') ? 1.0f : 0.0f;
+    rx += (PhotoKey(VK_RIGHT) ? 1.0f : 0.0f) - (PhotoKey(VK_LEFT) ? 1.0f : 0.0f);
+    ry += (PhotoKey(VK_DOWN) ? 1.0f : 0.0f) - (PhotoKey(VK_UP) ? 1.0f : 0.0f);
+    bool slow = g_raw[P_LB] || PhotoKey(VK_CONTROL), fast = g_raw[P_RB] || PhotoKey(VK_SHIFT);
+    float speed = g_photoMoveSpeed * (slow ? 0.25f : 1.0f) * (fast ? 4.0f : 1.0f);
+    float turn = g_photoTurnSpeed * (slow ? 0.35f : 1.0f);
     g_photoYaw += rx * 1.2f * turn * dt;
     g_photoPitch += (g_photoInvertY ? -ry : ry) * 0.9f * turn * dt;      // v0.49.1: stick up = look up (v0.49.2: option)
+    { int mx = g_phMx, my = g_phMy; g_phMx = g_phMy = 0;               // v1.21: mouse look
+      g_photoYaw += mx * 0.0025f * turn; g_photoPitch += (g_photoInvertY ? -my : my) * 0.0025f * turn; }
     if (g_photoPitch > 1.5f) g_photoPitch = 1.5f;
     if (g_photoPitch < -1.5f) g_photoPitch = -1.5f;
     PhotoBuildRot();
@@ -741,6 +859,54 @@ static bool PatchImport(const char* dll, const char* func, void* hook, void** or
     return false;
 }
 
+// ---------------------------------------------------------------- v1.40: game tables per preset
+// The three presets (Gore tab) also pick the game's tables at the next start: Extended Cut = the installed
+// tables.vpp, Original (Retail) = dvd_pc\data\tables_retail.vpp, Uncut = tables_uncut.vpp (made by the installer from
+// the player's files). pun.exe opens its packfiles with CreateFileA - the open of "tables.vpp" is pointed at the chosen
+// file. A missing file = the normal tables.vpp (logged). [Gore] Tables 0 Retail, 1 Uncut, 2 Extended Cut.
+static int  g_tablesSel = 2, g_tablesLoaded = 2;
+static char g_tablesAlt[MAX_PATH];
+static const char* kTablesNames[3] = { "Original (Retail)", "Uncut", "Extended Cut" };
+static const char* kTablesFiles[3] = { "tables_retail.vpp", "tables_uncut.vpp", "tables.vpp" };
+typedef HANDLE (WINAPI* CreateFileA_t)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
+static CreateFileA_t o_CreateFileA = nullptr;
+static HANDLE WINAPI Hook_CreateFileA(LPCSTR n, DWORD a, DWORD sh, LPSECURITY_ATTRIBUTES sa, DWORD cd, DWORD f, HANDLE t)
+{
+    if (g_tablesAlt[0] && n) {
+        size_t l = strlen(n);
+        if (l >= 10 && !_stricmp(n + l - 10, "tables.vpp") && (l == 10 || n[l - 11] == '\\' || n[l - 11] == '/')) {
+            static int logged = 0;
+            if (logged++ < 3) Log("tables: %s -> %s", n, g_tablesAlt);
+            n = g_tablesAlt;
+        }
+    }
+    return o_CreateFileA(n, a, sh, sa, cd, f, t);
+}
+static bool TablesFileThere(int sel)
+{
+    if (sel == 2) return true;
+    char exe[MAX_PATH], q[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH); if (char* z = strrchr(exe, '\\')) *z = 0;
+    snprintf(q, MAX_PATH, "%s\\dvd_pc\\data\\%s", exe, kTablesFiles[sel]);
+    return GetFileAttributesA(q) != INVALID_FILE_ATTRIBUTES;
+}
+static void InstallTablesSwitch(const char* ini)
+{
+    g_tablesSel = (int)GetPrivateProfileIntA("Gore", "Tables", 2, ini);
+    if (g_tablesSel < 0 || g_tablesSel > 2) g_tablesSel = 2;
+    g_tablesLoaded = 2;
+    if (g_tablesSel != 2) {
+        char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH); if (char* z = strrchr(exe, '\\')) *z = 0;
+        snprintf(g_tablesAlt, MAX_PATH, "%s\\dvd_pc\\data\\%s", exe, kTablesFiles[g_tablesSel]);
+        if (GetFileAttributesA(g_tablesAlt) == INVALID_FILE_ATTRIBUTES) {
+            Log("tables: %s chosen, but %s is not installed - the normal tables.vpp is used", kTablesNames[g_tablesSel], kTablesFiles[g_tablesSel]);
+            g_tablesAlt[0] = 0;
+        } else if (PatchImport("KERNEL32.dll", "CreateFileA", (void*)Hook_CreateFileA, (void**)&o_CreateFileA)) {
+            g_tablesLoaded = g_tablesSel;
+        } else { Log("tables: CreateFileA import not found - the normal tables.vpp is used"); g_tablesAlt[0] = 0; }
+    }
+    Log("tables: %s (%s)", kTablesNames[g_tablesLoaded], kTablesFiles[g_tablesLoaded]);
+}
+
 // ---------------------------------------------------------------- menus: the console pad query
 // 0x55CF90 is the console version's "pad direction pressed?" function, gutted on PC to "return 0"
 // (xor eax,eax / ret). The menu code still calls it next to every arrow-key check:
@@ -750,6 +916,7 @@ static bool PatchImport(const char* dll, const char* func, void* hook, void** or
 static DWORD g_lastMenuQuery = 0;
 static DWORD g_lastPopup = 0;        // v0.12: last time the pop-up box input handler 0x4768E0 ran
 static bool  g_menuActive = false;
+static bool  g_menuActiveFwd() { return g_menuActive; }   // v1.29 (used by PhotoHeld above)
 static bool  g_dirDown[4], g_dirFire[4];
 static bool  g_dirPulse[4];   // v0.50.8: one-update press for the Extended menu (it reads every frame itself)
 static DWORD g_dirNext[4];
@@ -1158,10 +1325,11 @@ static int   g_devBigHead = 0, g_devOldReticle = 0, g_devNoRespawn = 0, g_devUnl
 static int   g_devInvuln = 0, g_devSlaughter = 0, g_devHudMap = 0, g_devSongNames = 0, g_devCrouchToggle = 0, g_devZoomToggle = 0;
 static float g_devSlowmo = 1.0f;
 extern int g_levelPoolMB;        // v0.58: defined with PatchLevelPools
-static int   g_bwFilter = 1;     // v0.58: [Display] BlackWhite: environment kills in black & white (v0.63: kills only)
+static int   g_bwFilter = 0;     // v1.15: default Off (user: most players do not want it); ours wins. 0 off, 1 on, 2 game / other mods. v0.58: [Display] BlackWhite: environment kills in black & white (v0.63: kills only)
 static int   g_interKillScore = 0; // v0.66: [Gameplay] InterrogationKillScore 0 unchanged, 1 penalty (retail), 2 none, 3 bonus
 static int   g_achOn = 1;        // v0.68: [Achievements] Enabled
-static int   g_bwSlaughter = 1;  // v0.63: [Display] BlackWhiteSlaughter: Slaughter mode in black & white
+static int   g_achTabShow = 1;   // v1.46 (user, temporary): [Achievements] ShowTab - 0 hides the Achievements tab (test builds)
+static int   g_bwSlaughter = 1;  // v1.14: default On. 0 off, 1 on, 2 game / other mods. v0.63: [Display] BlackWhiteSlaughter: Slaughter mode in black & white
 static int   g_devForceBW = 0;   // v0.63 debug: [Developer] ForceBlackWhite=1 keeps the B&W screen on (seam test; not in the menu)
 static int   g_devHudKey = 0;    // v0.50.5: [Developer] HudToggle 0 off, 1-4 = hold LB + D-pad Up / Down / Left / Right
 static int   g_devHudVk = 0;     // v0.50.5: [Developer] HudToggleKey = any keyboard key (F8, H, NUMPAD5 ...), empty = none
@@ -1194,16 +1362,29 @@ static void HudToggleFrame()
 // "mov byte ptr [0x70E231], 1": env-kill finish 0x4D84EB (FUN_004D8150) and Slaughter-mode start 0x4C165B
 // (FUN_004C0480). Each option owns the immediate of its own instruction (code bytes checked first). Clearing
 // (slaughter end 0x4B84C0 / 0x4B9480, 0x4B7D20) is left to the game.
-static void BwImm(DWORD at, int on, const char* what)
+// v1.13: mode 2 = "Game / other mods": the byte is left as the game or another mod (ermaccer's PunisherPlugin
+// bDisableBlackWhiteFilterOnKills) set it; if we had changed it, the value from before our first change goes back.
+static void BwImm(DWORD at, int mode, const char* what)
 {
-    BYTE want = (BYTE)(on ? 1 : 0);
+    static BYTE orig[2]; static bool wrote[2];
+    int k = at == 0x4D84EB ? 0 : 1;
     volatile BYTE* p = (volatile BYTE*)(at + 6);
     if (*(volatile WORD*)at != 0x05C6 || *(volatile DWORD*)(at + 2) != 0x0070E231) return;   // not the US exe code
+    BYTE want;
+    if (mode == 2) {
+        if (!wrote[k]) {                                   // never touched: the game / other mods own it
+            static bool said[2];
+            if (!said[k] && *p != 1) { said[k] = true; Log("black & white %s: off - left as another mod set it (Game / other mods)", what); }
+            orig[k] = *p; return;
+        }
+        want = orig[k];
+    } else want = (BYTE)(mode ? 1 : 0);
+    if (!wrote[k]) orig[k] = *p;
     if (*p == want) return;
     BYTE was = *p;
     DWORD old;
     if (!VirtualProtect((void*)p, 1, PAGE_EXECUTE_READWRITE, &old)) return;
-    *p = want;
+    *p = want; wrote[k] = true;
     VirtualProtect((void*)p, 1, old, &old);
     FlushInstructionCache(GetCurrentProcess(), (void*)at, 7);
     static int logged = 0;
@@ -1288,7 +1469,7 @@ static void DevApply()
         *(volatile BYTE*)0x7D1110 = (BYTE)(g_devOldReticle ? 1 : 0);
         *(volatile BYTE*)0x7EEE40 = (BYTE)(g_devNoRespawn ? 1 : 0);
         *(volatile BYTE*)0x7D10CC = (BYTE)(g_devUnlimitedEnv ? 1 : 0);
-        *(volatile BYTE*)0x736738 = (BYTE)((g_devHudOff || g_photo) ? 1 : 0);
+        *(volatile BYTE*)0x736738 = (BYTE)((g_devHudOff || (g_photo && !PhotoHeld())) ? 1 : 0);   // v1.19 / v1.29: not while paused
         *(volatile BYTE*)0x7369D0 = (BYTE)(g_devHudMap ? 1 : 0);
         if (g_devForceBW) *(volatile BYTE*)0x70E231 = 1;
         InterKillScore();                                  // v0.66
@@ -1515,6 +1696,10 @@ static HRESULT WINAPI Hook_GetDeviceState(void* self, DWORD size, LPVOID data)
 {
     HRESULT hr = o_GetDeviceState(self, size, data);
     if (self != g_mouse || FAILED(hr) || !data || size < 16) return hr;
+    if (g_photo && !PhotoHeld()) {                        // v1.21: the photo camera takes the mouse
+        int* mm = (int*)data; g_phMx += mm[0]; g_phMy += mm[1]; g_phMw += mm[2];
+        mm[0] = mm[1] = mm[2] = 0; memset((BYTE*)data + 12, 0, size - 12 > 8 ? 8 : size - 12);
+    }
     ++g_frameNo;
     PadUpdate();
     SendKeys();
@@ -1579,6 +1764,7 @@ static HRESULT WINAPI Hook_GetDeviceState(void* self, DWORD size, LPVOID data)
     m[0] += ix; m[1] += iy;
     BYTE* buttons = (BYTE*)data + 12;
     int nButtons = (int)size - 12;
+    if (g_enhOpen && nButtons > 0) memset(buttons, 0, nButtons > 8 ? 8 : nButtons);   // v1.13: no real clicks under the menu
     for (int i = 0; i < P_COUNT; ++i) {
         const Target& t = g_cfg.map[i];
         if (t.kind == T_MOUSE_BUTTON && g_down[i] && t.value < nButtons) buttons[t.value] |= 0x80;
@@ -1602,6 +1788,26 @@ static HRESULT WINAPI Hook_GetDeviceData(void* self, DWORD cb, LPVOID rgdod, LPD
         d[0] = ofs; d[1] = value; d[2] = GetTickCount(); d[3] = ++g_seq;
         ++n;
     };
+    if (g_photo && !PhotoHeld()) {                    // v1.21: photo mode - no mouse events for the game
+        DWORD keep = 0;
+        for (DWORD i = 0; i < n; ++i) {
+            BYTE* e = (BYTE*)rgdod + i * cb; DWORD ofs = *(DWORD*)e;
+            if (ofs < 12 || (*(DWORD*)(e + 4) & 0x80)) continue;   // movement / wheel / presses dropped, releases pass
+            if (keep != i) memmove((BYTE*)rgdod + keep * cb, e, cb);
+            ++keep;
+        }
+        n = keep;
+    }
+    if (g_enhOpen) {                                  // v1.13: real mouse clicks do not reach the pause screen under the menu
+        DWORD keep = 0;
+        for (DWORD i = 0; i < n; ++i) {
+            BYTE* e = (BYTE*)rgdod + i * cb; DWORD ofs = *(DWORD*)e;
+            if (ofs >= 12 && ofs < 20 && (*(DWORD*)(e + 4) & 0x80)) continue;   // button press (releases pass)
+            if (keep != i) memmove((BYTE*)rgdod + keep * cb, e, cb);
+            ++keep;
+        }
+        n = keep;
+    }
     // press/release events for pad buttons mapped to mouse buttons (DIMOFS_BUTTON0 = 12)
     PadUpdate();
     for (int i = 0; i < P_COUNT; ++i) {
@@ -2175,6 +2381,10 @@ static int __cdecl Hook_BulletMark(DWORD tex, DWORD mesh, DWORD pos, DWORD dir, 
 // ebx+0x94, bind pose flag 1). For the kills below we paint our own marks instead and skip to 0x4CDB03.
 // Kill = the victim's current action anim: 0x418D00(entity, [entity+0x828]) -> anim slot (same as corpse creation).
 static int g_goreKillWounds = 1;   // [Gore] KillWounds
+// v0.86: ONE switch for ALL blood / gore the Extended Cut adds to environmental quick kills AND environmental
+// interrogations (user Nov 20: every remastered one goes under it). So far: meat hook (marks, spray,
+// drip, pool; semi trailer: kick blood; later ones go here too). [Gore] EnvKillBlood 0 = Original, 1 = Extended
+int g_envKillBlood = 1;
 struct WMark { int tex; float x, y, z, dx, dy, dz, size; int ms; };   // v0.47: ms = delay after the kill's blood moment / start
 struct KillMarks { const char* anim; const char* name; WMark m[12]; };
 // mesh space, bind pose: y up, +z = the thug's front, +x = his right. Torso front ~ +0.13, back ~ -0.13,
@@ -2325,10 +2535,12 @@ static void PaintKillMarks(DWORD mesh, DWORD handle, const KillMarks* k, const c
 }
 // called every frame (mouse poll) and right after the grab: paint once the game's blood-drop timer has run out
 static void PropStartPoll();
+static void HookFxTick();
 static void GorePendingUpdate()
 {
     PropStartPoll();
     RunSchedule();
+    HookFxTick();                                            // v0.84
     if (!g_pend.active) return;
     DWORD waited = GetTickCount() - g_pend.tick;
     bool go = !g_pend.useTimer || (int)waited >= g_pend.maxMs;
@@ -2431,11 +2643,804 @@ static void PropSchedule(DWORD g, const KillMarks* k, int id, DWORD handle, cons
         if (m.size > 0 && g_schedN < 48) g_sched[g_schedN++] = { now + (DWORD)m.ms, handle, m, jx, jy, k->name };
     g_propDoneV = handle;
 }
+// v0.84 (test): MEAT HOOK IMPALE blood. The Meat1 hook spots reuse the zoo's tiki kill (group "Zoo Tiki Impale",
+// death effect env_kill_tiki), so the hook kill = that effect id while the Punisher stands at the Meat1 hook wall
+// (box below - test only; the zoo's tiki torches are elsewhere). Times are ms from the kill's start: the victim is
+// lifted onto the hook at about frame 80 of male_ek_tikikill.rfa (30 fps) = 2.7 s.
+//   marks: exit wound on the chest + entry on the upper back (bind height 1.34 = 10 cm above male-spine1, where the
+//          2.0 m hook meets the lifted body), blood running down front and back, blood on the chin
+//   spurts: blood_hit_0 on the neck point (follows the body) = the wound; blood_hit_2 at the mouth (head bone + offset)
+//   drops: the game's own quick-kill blood drops 0x41F5C0(handle, blood point, pos, count, ms between, 0.95, -1)
+//          (as 0x4CB5F1 calls it for knife kills: point = [0x6B7108 + skel * 0x2D0 + 0xD4]) -> drops on the floor
+// v0.84.2: times from the death effect env_kill_tiki = the moment he is stabbed (v0.84.1 Deck test: everything came
+// ~2.7 s late); more on the upper chest (user); splash moved in (x 0.02 / z 0.28 missed the body every time)
+static const KillMarks kHookMarks = { "env_kill_tiki", "meat hook (upper chest, in the back, out the front)", {
+    { TX_HIT, 0, 1.34f, 0.17f, 0, 0, -1, 0.05f, 0 }, { TX_DENSE, 0, 1.34f, 0.27f, 0, 0, -1, 0.15f, 0 },
+    { TX_SPLASH, 0, 1.37f, 0.27f, 0, 0, -1, 0.13f, 60 }, { TX_DENSE, -0.03f, 1.46f, 0.26f, 0, 0, -1, 0.13f, 120 },
+    { TX_SPLASH, 0.04f, 1.49f, 0.25f, 0, 0, -1, 0.11f, 200 }, { TX_DRIP, 0, 1.22f, 0.25f, 0, 0, -1, 0.14f, 600 },
+    { TX_DRIP, 0.03f, 1.12f, 0.25f, 0, 0, -1, 0.12f, 1500 },
+    { TX_HIT, 0, 1.34f, -0.17f, 0, 0, 1, 0.05f, 0 }, { TX_DENSE, 0, 1.34f, -0.27f, 0, 0, 1, 0.16f, 0 },
+    { TX_STREAK, 0, 1.30f, -0.28f, 0, 0, 1, 0.15f, 100 }, { TX_DRIP, 0, 1.20f, -0.25f, 0, 0, 1, 0.13f, 900 },
+    { TX_DRIP, 0, 1.55f, 0.14f, 0, 0, -1, 0.07f, 500 } } };
+struct HookFx { DWORD due; DWORD handle; int kind; int n; float floorY; int tiki; };   // v1.43: + the floor height at the stab, v1.44: + tiki kill   // kind 0 = wound spurt, 1 = mouth spurt, 2 = floor drops, 3 = bear-trap pool,
+                                                                 // 4 = qk_gullet spray, 5/6 = game drops, 7 = l_blood_drip01 drip (v0.84.10)
+static HookFx g_hookFx[64]; static int g_hookFxN = 0;
+// v1.43 (Deck, tiki kill: pools floating 0.5 m up): the pool and the drip splashes used the Punisher's feet height at
+// the moment they spawned - the pool is re-spawned every 20 s, so after he stepped onto the tiki bar's raised floor
+// they hung in the air. Now every effect keeps the floor height taken at the stab.
+static float g_hookFloorNow = -1000.0f;   // set by HookFire for the pushes it makes
+static int g_hookKind = 0;   // v1.41: 0 = meat hook (Meat1), 1 = tiki torch (zoo1)
+static int g_spikeSplat = 0; // v1.45: tiki spike blood splat - off until the world decal shows (see kind 8)
+static void HookPush(DWORD due, DWORD h, int kind, int n, float fy = -1000.0f, int tiki = -1)
+{
+    if (fy < -999.0f) fy = g_hookFloorNow;
+    if (tiki < 0) tiki = g_hookKind;
+    if (g_hookFxN < 64) g_hookFx[g_hookFxN++] = { due, h, kind, n, fy, tiki };
+}
+static int g_hookTikiId = -2, g_hookWoundId = -2, g_hookMouthId = -2, g_hookPoolId = -2, g_hookSprayId = -2, g_hookDripId = -2, g_hookSplashId = -2;
+static DWORD g_hookLastV = 0;
+extern DWORD g_hookOldCorpse;
+static DWORD g_hookFixH = 0, g_hookFixFrom = 0, g_hookFixUntil = 0; static int g_hookFixLog = 0;   // v0.84.7: depth fix
+static void g_apStabSet();   // v1.37 diag (defined with HookApproachTick)
+// v1.41 (user: "apply the blood and gore from the hook kill to the tiki kill"): the zoo1 tiki torch impale = the same
+// kill (death effect env_kill_tiki), so outside the Meat1 hook area it gets the same added blood. Its position / depth
+// are left alone (the depth measuring is for the hooks only). The drip and the floor pool need 3 effect files + the
+// pool texture that only Meat1 has - the zoo1 part (recipe zoo1_tiki_blood.py) adds them to zoo1.vpp; without them the
+// tiki kill gets the marks, the spray and the spurts only (an effect whose file the level lacks is not spawned).
+// g_hookKind (declared above HookPush): 0 = meat hook (Meat1), 1 = tiki torch (zoo1)
+static int g_tikiFiles = -1; // zoo1.vpp has the drip / pool files: -1 not checked yet, 0 no, 1 yes
+static bool TikiFilesThere()
+{
+    if (g_tikiFiles >= 0) return g_tikiFiles == 1;
+    g_tikiFiles = 0;
+    char exe[MAX_PATH], q[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH); if (char* z = strrchr(exe, '\\')) *z = 0;
+    snprintf(q, MAX_PATH, "%s\\dvd_pc\\data\\shipping\\zoo\\zoo1.vpp", exe);
+    if (FILE* f = fopen(q, "rb")) {                     // the packfile's name directory is near the start
+        static char buf[262144]; size_t n = fread(buf, 1, sizeof(buf), f); fclose(f);
+        bool a = false, b = false;
+        for (size_t i = 0; i + 22 <= n; ++i) {
+            if (!a && !_strnicmp(buf + i, "env_kill_bear_trp.rxe", 21)) a = true;
+            if (!b && !_strnicmp(buf + i, "blood_drip01.rxe", 16)) b = true;
+            if (a && b) break;
+        }
+        g_tikiFiles = (a && b) ? 1 : 0;
+    }
+    Log("tiki kill: zoo1.vpp %s the drip / pool files", g_tikiFiles ? "has" : "does NOT have (marks + spray only)");
+    return g_tikiFiles == 1;
+}
+static bool HookArea()
+{
+    DWORD p = *(volatile DWORD*)0x6B70FC; if (!p) return false;
+    float x = *(volatile float*)(p + 0x1C), y = *(volatile float*)(p + 0x20), z = *(volatile float*)(p + 0x24);
+    // v0.84.6: all 23 Meat1 wall hooks (Meat1.dbr racks, out\next_build\hooks_meat1.json): the x -68 wall (z -10..53)
+    // and the back-to-back racks around z 7..12 (x -89..-82)
+    if (y < -1.0f || y > 2.0f) return false;
+    return (x > -72.0f && x < -66.0f && z > -12.0f && z < 55.0f) || (x > -91.0f && x < -79.0f && z > 4.0f && z < 15.0f);
+}
+static void HookIds()
+{
+    if (g_hookTikiId == -2) {
+        __try {
+            g_hookTikiId  = ((int (__cdecl*)(const char*))0x40E440)("env_kill_tiki");
+            g_hookWoundId = ((int (__cdecl*)(const char*))0x40E440)("blood_hit_0");
+            g_hookMouthId = ((int (__cdecl*)(const char*))0x40E440)("blood_hit_2");
+            g_hookPoolId  = ((int (__cdecl*)(const char*))0x40E440)("env_kill_bear_trp");
+            g_hookSprayId = ((int (__cdecl*)(const char*))0x40E440)("qk_gullet");     // v0.84.8: pistol lift-and-shoot spray
+            g_hookDripId  = ((int (__cdecl*)(const char*))0x40E440)("l_blood_drip01"); // v0.84.10: Meat1's own falling drip
+            g_hookSplashId = ((int (__cdecl*)(const char*))0x40E440)("l_blood_hit01"); //   + its splash on the floor
+        } __except (1) { g_hookTikiId = -1; }
+        Log("hook kill: effect ids tiki %d, wound blood_hit_0 %d, mouth blood_hit_2 %d, bear-trap drip / pool %d", g_hookTikiId,
+            g_hookWoundId, g_hookMouthId, g_hookPoolId);
+    }
+}
+// v0.84.3: the death effect env_kill_tiki is spawned when the kill STARTS (still in the human shield - Deck log:
+// spawn, then "hostage released (animation set 12)"), not at the stab. So the start only arms a watch: the blood fires
+// when the victim's head (mouth point) is lifted to hook height (> 2.05 m above the Punisher's feet) = the stab.
+static DWORD g_hookWatchV = 0, g_hookWatchUntil = 0; static float g_hookWatchMax = 0;
+DWORD g_hookOldCorpse = 0;             // v0.84.4: +0x87C when the kill started (the previous victim)
+static void HookFire(DWORD g, DWORD v, const char* how);
+static char g_hookVictimName[40] = "?";   // v1.27: the thug's model name, read from the LIVING thug at the start
+static void HookBegin(DWORD g, DWORD v, const char* how)
+{
+    if (!v || v == g_hookLastV) return;
+    g_hookLastV = v;
+    g_hookWatchV = v; g_hookWatchUntil = GetTickCount() + 10000; g_hookWatchMax = -99.0f;
+    Log("hook kill: victim %08X - waiting for the stab (%s)", v, how);
+    __try {                                                      // v1.24 diag: where the kill starts
+        DWORD pl = *(volatile DWORD*)0x6B70FC; DWORD ve = ((DWORD (__cdecl*)(DWORD))0x4A8D20)(v);
+        strcpy(g_hookVictimName, "?");
+        if (ve) {
+            const char* q = *(const char* volatile*)(ve + 0x260); int i = 0;
+            if ((DWORD)q > 0x10000) for (; i < 39 && q[i] >= 32 && q[i] < 127; ++i) g_hookVictimName[i] = q[i];
+            g_hookVictimName[i ? i : 1] = 0; if (!i) g_hookVictimName[0] = '?';
+        }
+        if (pl && ve) {                                          // v1.35: + facing (degrees, atan2 of the forward row)
+            volatile float* R = (volatile float*)(pl + 0x28); volatile float* V = (volatile float*)(ve + 0x28);
+            Log("hook kill: start - Punisher at %.2f %.2f facing %.1f deg, thug at %.2f %.2f facing %.1f deg",
+                *(volatile float*)(pl + 0x1C), *(volatile float*)(pl + 0x24), atan2f(R[6], R[8]) * 57.2958f,
+                *(volatile float*)(ve + 0x1C), *(volatile float*)(ve + 0x24), atan2f(V[6], V[8]) * 57.2958f);
+        }
+    } __except (1) {}
+}
+static void HookFire(DWORD g, DWORD v, const char* how)
+{
+    // v0.86 (user: the toggle is for the ADDED blood, one switch for every environmental kill we change): the kill
+    // always plays; [Gore] EnvKillBlood=0 (Original) = no marks, spray, drip or pool
+    if (!g_envKillBlood) { Log("hook kill: victim %08X - environmental kill blood is Original, no added blood (%s)", v, how); return; }
+    if (g) PropSchedule(g, &kHookMarks, g_hookTikiId, v, how);
+    else {
+        DWORD now0 = GetTickCount();
+        for (const WMark& m : kHookMarks.m)
+            if (m.size > 0 && g_schedN < 48) g_sched[g_schedN++] = { now0 + (DWORD)m.ms, v, m, 0, 0, kHookMarks.name };
+        g_propDoneV = v;
+        Log("hook kill: marks timed from %s", how);
+    }
+    {   // v1.43: the floor = the Punisher's feet at the stab (he stands next to the hook / torch)
+        DWORD pl = *(volatile DWORD*)0x6B70FC;
+        g_hookFloorNow = pl ? *(volatile float*)(pl + 0x20) : -1000.0f;
+    }
+    DWORD now = GetTickCount();                                // v0.84.10: earlier kills keep their drip / pool refresh
+    // v0.84.8 (user, test 8 video: the 10 small spurts "fire off multiple times but don't look good"): ONE spray,
+    // the pistol lift-and-shoot quick kill's qk_gullet, attached to the thug the way the game attaches a QK spray
+    HookPush(now, v, 4, 0);
+    // v0.84.9 (test 9: the bear trap effect's drips started at the LEG + a mist burst at the crotch; Meat1's copy is now
+    // pool-only): the drip = the game's own blood drops from a world point at the chest wound, two runs
+    // v0.84.10 (test 10: the game drops are only floor splats - nothing falls): the drip = Meat1's own l_blood_drip01
+    // (the drip of the hanging meat, with its drip sound) from the chest wound, repeated; the pool is refreshed
+    // v1.45: blood splats on the tiki spike (kind 8) - OFF: the decal record is made (laptop SplatTest: list 0 -> 1,
+    // ray hits, gates pass) but nothing shows on screen yet. Research note in RESUME (Nov 21).
+    if (g_hookKind == 1 && g_spikeSplat) { HookPush(now + 500, v, 8, 0); HookPush(now + 850, v, 8, 1); }
+    if (g_hookKind == 0 || TikiFilesThere()) {   // v1.41: the tiki kill only with the zoo1 part installed
+        HookPush(now + 200, v, 7, 0);
+        HookPush(now + 450, v, 3, 0);              // v0.84.2: bear-trap pool (Meat1's copy is pool-only since v0.84.9)
+    }
+    // v0.84.9: depth fix OFF - test 9 log: writing the thug's position does not stick (the game sets it again every
+    // frame; the logged depth kept the same / grew while it "moved" him 10 cm per frame)
+    // v1.24: the depth fix is armed at the stab (HookWatchTick) and waits until the body has SETTLED (see HookDepthTick)
+    Log("%s: victim %08X - 10 marks, the qk_gullet spray%s scheduled (%s)", g_hookKind ? "tiki kill" : "hook kill", v,
+        (g_hookKind == 0 || TikiFilesThere()) ? " + the drip / pool" : "", how);
+}
+static bool HookKillStart(DWORD g, DWORD v)
+{
+    int id = -1; __try { id = *(volatile int*)(g + 0x20); } __except (1) { return false; }
+    HookIds();
+    if (id < 0 || id != g_hookTikiId) return false;
+    bool area = false; __try { area = HookArea(); } __except (1) {}
+    g_hookKind = area ? 0 : 1;                  // v1.41: outside the Meat1 hooks = the zoo tiki torch
+    HookBegin(g, v, area ? "the group (meat hook)" : "the group (tiki torch)");
+    return true;
+}
+// v0.84.1: v0.84 never saw the hook kill start through the group poll (Deck log: no "hook kill" line - the kill starts
+// from a human shield). The quick kill's death effect (env_kill_tiki) is spawned at the START of the kill (rumble
+// note v0.19), so it is the trigger now; the victim = the shield / quick-kill handle at Punisher +0x87C / +0x878.
+// v0.84.2: f = the spawn call's stack (f[1] id, f[6] parent handle = the entity the effect is attached to). v0.84.1
+// took +0x878 when there was no shield - a stale handle of an earlier victim (orange thug: no marks on him).
+static void __cdecl HookOnSpawn(const DWORD* f)
+{
+    int id = (int)f[1];
+    if (id < 0) return;
+    HookIds();
+    if (id != g_hookTikiId) return;
+    __try {
+        DWORD p = *(volatile DWORD*)0x6B70FC; if (!p) return;
+        DWORD ph = *(volatile DWORD*)(p + 0x14), a = *(volatile DWORD*)(p + 0x87C), b = *(volatile DWORD*)(p + 0x878);
+        DWORD par = f[6];
+        bool area = HookArea();
+        Log("hook kill: env_kill_tiki spawned - in the hook area %d, parent %08X, +87C %08X, +878 %08X", (int)area, par, a, b);
+        g_hookKind = area ? 0 : 1;              // v1.41: outside the Meat1 hooks = the zoo tiki torch (same blood)
+        // v0.84.4 (user: the blood showed on the thug ALREADY on the hook when the NEXT kill started): +0x87C is the
+        // corpse of the LAST quick-kill / shield victim (see the gore code), +0x878 the thug in the shield now.
+        DWORD v = 0;
+        if (b && b != 0xFFFFFFFF && b != ph && ((DWORD (__cdecl*)(DWORD))0x4A8D20)(b)) v = b;
+        g_hookOldCorpse = a;
+        if (!v) { Log("hook kill: no victim handle"); return; }
+        HookBegin(0, v, area ? "the death effect (meat hook)" : "the death effect (tiki torch)");
+    } __except (1) { Log("hook kill: start raised an exception"); }
+}
+// head bone -> mouth, in world space (bone matrices = model space, model -> world with the entity's +0x28 rows)
+// v0.84.7: bone + offset in bone axes. Deck test 7: the face points along the bone's -Z (model -Z = facing), v0.84.5
+// used +Z, so the mouth / wound spurts came out of the back of the head / into the rack. fwdOff now = toward the face.
+static bool HookBone(DWORD ent, const char* bone, float upOff, float fwdOff, float* out);
+static bool HookHeadPoint(DWORD ent, float upOff, float fwdOff, float* out) { return HookBone(ent, "male-head", upOff, fwdOff, out); }
+static bool HookMouth(DWORD ent, float* out) { return HookHeadPoint(ent, 0.08f, 0.10f, out); }
+static bool HookBone(DWORD ent, const char* bone, float upOff, float fwdOff, float* out)
+{
+    DWORD mesh = *(volatile DWORD*)(ent + 0x94); if (!mesh) return false;
+    ((void (__cdecl*)(DWORD))0x529800)(mesh);
+    DWORD skel = *(volatile DWORD*)(mesh + 0x474), mats = *(volatile DWORD*)(mesh + 8);
+    if (!skel || !mats) return false;
+    int n = *(volatile int*)(skel + 0x48) + *(volatile int*)(skel + 0x4C);
+    DWORD recs = *(volatile DWORD*)(skel + 0x50);
+    int hb = -1; size_t bl = strlen(bone) + 1;
+    for (int i = 0; i < n && i < 80 && recs; ++i) if (!strncmp((const char*)(recs + 0x88 * i + 0x6C), bone, bl)) { hb = i; break; }
+    if (hb < 0) return false;
+    volatile float* m = (volatile float*)(mats + 0x30 * hb);
+    float mp[3];
+    for (int k = 0; k < 3; ++k) mp[k] = m[9 + k] + upOff * m[3 + k] - fwdOff * m[6 + k];
+    volatile float* R = (volatile float*)(ent + 0x28);
+    for (int k = 0; k < 3; ++k) out[k] = mp[0] * R[k] + mp[1] * R[3 + k] + mp[2] * R[6 + k] + *(volatile float*)(ent + 0x1C + 4 * k);
+    static int logged = 0;
+    if (logged++ < 3) {
+        float hw[3];
+        for (int k = 0; k < 3; ++k) hw[k] = m[9] * R[k] + m[10] * R[3 + k] + m[11] * R[6 + k] + *(volatile float*)(ent + 0x1C + 4 * k);
+        Log("hook kill: head bone %d at %.2f %.2f %.2f, mouth %.2f %.2f %.2f (bone rows up %.2f %.2f %.2f fwd %.2f %.2f %.2f)",
+            hb, hw[0], hw[1], hw[2], out[0], out[1], out[2], m[3], m[4], m[5], m[6], m[7], m[8]);
+    }
+    return true;
+}
+static bool HookMouth(DWORD ent, float* out);
+static void HookWatchTick()
+{
+    if (!g_hookWatchV) return;
+    DWORD now = GetTickCount();
+    __try {
+        DWORD ent = ((DWORD (__cdecl*)(DWORD))0x4A8D20)(g_hookWatchV);
+        DWORD pl = *(volatile DWORD*)0x6B70FC;
+        float m[3];
+        DWORD c = pl ? *(volatile DWORD*)(pl + 0x87C) : 0;
+        if (c && c != 0xFFFFFFFF && c != g_hookOldCorpse && ((DWORD (__cdecl*)(DWORD))0x4A8D20)(c)) {
+            DWORD ce = ((DWORD (__cdecl*)(DWORD))0x4A8D20)(c);
+            float up = -99.0f;
+            if (HookMouth(ce, m)) up = m[1] - *(volatile float*)(pl + 0x20);
+            g_hookWatchV = 0;
+            g_apStabSet();   // v1.37
+            Log("hook kill: stab - he is now the corpse %08X (head %.2f m up)", c, up);
+            if (g_hookKind == 0) { g_hookFixH = c; g_hookFixFrom = now + 300; g_hookFixUntil = now + 20000; g_hookFixLog = 0; }   // v1.24 (v1.41: hooks only)
+            HookFire(0, c, "the stab (new corpse)");
+            return;
+        }
+        if (ent && pl && HookMouth(ent, m)) {
+            float up = m[1] - *(volatile float*)(pl + 0x20);
+            if (up > g_hookWatchMax) g_hookWatchMax = up;
+            if (up > 2.05f) {
+                DWORD v = g_hookWatchV; g_hookWatchV = 0;
+                g_apStabSet();   // v1.37
+                Log("hook kill: stab - head %.2f m up at %.2f %.2f %.2f (Punisher at %.2f %.2f facing %.1f deg)", up, m[0], m[1], m[2],
+                    *(volatile float*)(pl + 0x1C), *(volatile float*)(pl + 0x24),
+                    atan2f(((volatile float*)(pl + 0x28))[6], ((volatile float*)(pl + 0x28))[8]) * 57.2958f);   // v1.35
+                if (g_hookKind == 0) { g_hookFixH = v; g_hookFixFrom = now + 300; g_hookFixUntil = now + 20000; g_hookFixLog = 0; }   // v1.24 (v1.41: hooks only)
+                HookFire(0, v, "the stab (head at hook height)");
+                return;
+            }
+        }
+    } __except (1) { Log("hook kill: watch raised an exception"); g_hookWatchV = 0; return; }
+    if ((int)(now - g_hookWatchUntil) >= 0) {
+        Log("hook kill: no stab seen in 10 s (head got %.2f m up) - no hook blood", g_hookWatchMax);
+        g_hookWatchV = 0;
+    }
+}
+// v0.84.7: the 23 Meat1 wall hooks (out\next_build\hooks_meat1.json): mesh tip (x, z) + direction out of the wall
+struct HookTip { float x, z, dx, dz; };
+static const HookTip kHookTips[23] = {
+    { -68.75f, 48.5f, -1, 0 }, { -68.75f, 50.5f, -1, 0 }, { -68.75f, 52.5f, -1, 0 }, { -68.75f, 38.5f, -1, 0 },
+    { -68.75f, 40.5f, -1, 0 }, { -68.75f, 42.5f, -1, 0 }, { -68.75f, 0.5f, -1, 0 },  { -68.75f, 2.5f, -1, 0 },
+    { -68.75f, 4.5f, -1, 0 },  { -68.75f, -9.5f, -1, 0 }, { -68.75f, -7.5f, -1, 0 }, { -68.75f, -5.5f, -1, 0 },
+    { -88.625f, 12.25f, 0, -1 }, { -86.625f, 12.25f, 0, -1 }, { -84.625f, 12.25f, 0, -1 },
+    { -88.625f, 7.25f, 0, -1 }, { -86.625f, 7.25f, 0, -1 }, { -84.625f, 7.25f, 0, -1 }, { -82.625f, 7.25f, 0, -1 },
+    { -88.625f, 8.75f, 0, 1 },  { -86.625f, 8.75f, 0, 1 },  { -84.625f, 8.75f, 0, 1 },  { -82.625f, 8.75f, 0, 1 } };
+// Deck test 7 (8 kills): the body's settled depth on the hook was the same on 6 hooks and ~10 cm deeper on 2 (the game
+// does not put the thug exactly on the hotspot every time). After the stab the chest bone (male-spine1) is measured
+// along the hook and the body is moved to the usual depth: spine1 15 cm out from the mesh tip (the 6 good kills).
+// v0.84.8: test 8 measured spine1 0.229-0.233 m PAST the mesh tip on all 4 kills (the hook tip shows through the
+// chest = right), so v0.84.7's 0.15 was never reached (no move). The usual depth is -0.23; the deeper outliers of
+// test 7 (~10 cm) are -0.33.
+static const float kHookDepth = -0.23f;
+static int HookNearest(const float* p)
+{
+    int best = -1; float bd = 1.0f;
+    for (int i = 0; i < 23; ++i) {
+        float dx = p[0] - kHookTips[i].x, dz = p[2] - kHookTips[i].z, d = sqrtf(dx * dx + dz * dz);
+        if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+}
+static DWORD HookResolve(DWORD* h)        // the living thug, or his corpse once the game swapped it (~1.4 s after the stab)
+{
+    DWORD ent = ((DWORD (__cdecl*)(DWORD))0x4A8D20)(*h);
+    if (ent) return ent;
+    DWORD pl = *(volatile DWORD*)0x6B70FC;
+    DWORD c = pl ? *(volatile DWORD*)(pl + 0x87C) : 0;
+    if (c && c != 0xFFFFFFFF && c != g_hookOldCorpse && (ent = ((DWORD (__cdecl*)(DWORD))0x4A8D20)(c))) { *h = c; return ent; }
+    return 0;
+}
+// v1.24 (Deck test of hook test 13, 11 kills: head 0.58-0.59 m out from the hook on 8, 0.49 on 1, 0.66-0.68 on 2 = the
+// game does not always line the thug up the same): the depth fix is back, but it waits until the body has SETTLED
+// (chest depth unchanged for 0.6 s - while the kill animation plays the game re-places him every frame, test 9), then
+// slides him to the usual depth over 0.3 s and checks 1 s later whether it held. Logged.
+static void HookDepthTick()
+{
+    static float lastD = 99.0f, moveLeft = 0.0f; static DWORD stableSince = 0, moveEnd = 0, verifyAt = 0; static int phase = 0, hk = -1;
+    if (!g_hookFixH) { phase = 0; return; }
+    DWORD now = GetTickCount();
+    if ((int)(now - g_hookFixFrom) < 0) return;
+    if ((int)(now - g_hookFixUntil) >= 0) {
+        if (phase == 0) Log("hook kill: depth - the body never settled (last %.3f m)", lastD);
+        g_hookFixH = 0; phase = 0; lastD = 99.0f; return;
+    }
+    __try {
+        DWORD ent = HookResolve(&g_hookFixH); if (!ent) return;
+        float sp[3]; if (!HookBone(ent, "male-spine1", 0, 0, sp)) { Log("hook kill: depth - no male-spine1 bone"); g_hookFixH = 0; return; }
+        int h = HookNearest(sp); if (h < 0) { if (g_hookFixLog++ < 1) Log("hook kill: depth - no hook within 1 m of the chest"); return; }
+        const HookTip& t = kHookTips[h];
+        float depth = (sp[0] - t.x) * t.dx + (sp[2] - t.z) * t.dz, err = depth - kHookDepth;
+        {   // v1.36 diag (two normal kills ended at exactly -0.409 instead of -0.31): the depth every 100 ms from the
+            // stab until settled, with the entity (the corpse swap shows as a new address) - where do the 10 cm come from?
+            static DWORD tl = 0, tlEnt = 0; static int tlN = 0; static char tlBuf[600]; static int tlLen = 0;
+            static DWORD tlKill = 0;
+            if (g_hookFixFrom != tlKill) { tlKill = g_hookFixFrom; tlN = 0; tlLen = 0; tlBuf[0] = 0; tlEnt = 0; }   // a new kill
+            if (now - tl >= 100 && tlN < 60) {
+                tl = now; ++tlN;
+                if (ent != tlEnt) { tlLen += snprintf(tlBuf + tlLen, sizeof(tlBuf) - tlLen, " [%08X]", ent); tlEnt = ent; }
+                if (tlLen < (int)sizeof(tlBuf) - 12) tlLen += snprintf(tlBuf + tlLen, sizeof(tlBuf) - tlLen, " %.2f", depth);
+            }
+            if (phase == 0 && fabsf(depth - lastD) <= 0.004f && (int)(now - stableSince) >= 600) {
+                Log("hook kill: depth timeline (100 ms steps):%s", tlBuf); tlN = 0; tlLen = 0; tlBuf[0] = 0; tlEnt = 0;
+            }
+        }
+        if (phase == 0) {                                    // waiting for the body to stop moving
+            if (fabsf(depth - lastD) > 0.004f) { lastD = depth; stableSince = now; return; }
+            if ((int)(now - stableSince) < 600) return;
+            // v1.25 (user: the slide after death does not look natural): measure + log only, the body is never moved.
+            // v1.24 Deck log: all 13 kills settled at -0.307..-0.324 m = the stab depth is the same every time.
+            (void)err; (void)moveLeft; (void)moveEnd; (void)verifyAt; (void)hk;
+            {   // v1.26: which thug model + the clock time, to match the author's screenshots (fat / bulky jackets clip?)
+                static int kills = 0; SYSTEMTIME st; GetLocalTime(&st);
+                Log("hook kill #%d at %02d:%02d:%02d: %s on hook %d settled at %.3f m (measured only)",
+                    ++kills, st.wHour, st.wMinute, st.wSecond, g_hookVictimName, h, depth);
+            }
+            g_hookFixH = 0; lastD = 99.0f; return;
+            phase = 1; hk = h; moveLeft = -err; moveEnd = now + 300;
+            Log("hook kill: depth on hook %d settled at %.3f m - sliding %.3f m to %.2f", h, depth, -err, kHookDepth);
+            return;
+        }
+        if (phase == 1) {                                    // slide over 0.3 s
+            float step = ((int)(moveEnd - now) <= 16) ? moveLeft : moveLeft * 0.25f;
+            *(volatile float*)(ent + 0x1C) += step * kHookTips[hk].dx; *(volatile float*)(ent + 0x24) += step * kHookTips[hk].dz;
+            moveLeft -= step;
+            if (fabsf(moveLeft) < 0.001f) { phase = 2; verifyAt = now + 1000; }
+            return;
+        }
+        if (phase == 2 && (int)(now - verifyAt) >= 0) {
+            Log("hook kill: depth check 1 s later: %.3f m (%s)", depth, fabsf(depth - kHookDepth) <= 0.03f ? "held" : "the game moved him back");
+            g_hookFixH = 0; phase = 0; lastD = 99.0f;
+        }
+    } __except (1) { Log("hook kill: depth fix raised an exception"); g_hookFixH = 0; phase = 0; }
+}
+static const float kHookPoolOut = 0.50f, kHookPoolSide = -0.15f;   // v0.84.8
+static void HookFloorFwd(DWORD ent, float* f)   // the body's facing on the floor (model -Z = out of the wall)
+{
+    volatile float* R = (volatile float*)(ent + 0x28);
+    f[0] = -R[6]; f[1] = 0; f[2] = -R[8];
+    float l = sqrtf(f[0] * f[0] + f[2] * f[2]); if (l < 0.01f) { f[0] = 0; f[2] = 0; return; }
+    f[0] /= l; f[2] /= l;
+}
+// v0.85 (user: a toggle in the Extended menu, Original / Extended, like the interrogations): [Gameplay] MeatHookKill.
+// v0.86: the author meant the added BLOOD, not the kill - the kill is always on now (no menu row / INI key; the
+// trigger code stays for the log line); the blood is [Gore] EnvKillBlood.
+// Off = the 23 hook spots' triggers (Meat1.vpp, Hook_Impale_NN_Trigger, positions below) are marked used up (+0x250
+// max uses = 0 - what 0x4F8BD0 checks), so no glow and no kill = the retail game. On = back to 1 (if not used).
+int g_hookKillOn = 1;
+static const float kHookTrig[23][3] = {
+    { -69.337f, 0.979f, 48.432f },
+    { -69.337f, 0.979f, 50.432f },
+    { -69.337f, 0.979f, 52.432f },
+    { -69.337f, 0.979f, 38.432f },
+    { -69.337f, 0.979f, 40.432f },
+    { -69.337f, 0.979f, 42.432f },
+    { -69.337f, 0.979f, 0.432f },
+    { -69.337f, 0.979f, 2.432f },
+    { -69.337f, 0.979f, 4.432f },
+    { -69.337f, 0.979f, -9.568f },
+    { -69.337f, 0.979f, -7.568f },
+    { -69.337f, 0.979f, -5.568f },
+    { -88.557f, 0.979f, 11.663f },
+    { -86.557f, 0.979f, 11.663f },
+    { -84.557f, 0.979f, 11.663f },
+    { -88.557f, 0.979f, 6.663f },
+    { -86.557f, 0.979f, 6.663f },
+    { -84.557f, 0.979f, 6.663f },
+    { -82.557f, 0.979f, 6.663f },
+    { -88.693f, 0.979f, 9.337f },
+    { -86.693f, 0.979f, 9.337f },
+    { -84.693f, 0.979f, 9.337f },
+    { -82.693f, 0.979f, 9.337f }
+};
+static void HookTriggersTick()
+{
+    static DWORD next = 0; static int lastFound = -1, lastState = -1;
+    DWORD now = GetTickCount();
+    if ((int)(now - next) < 0) return;
+    next = now + 1000;
+    int found = 0, changed = 0;
+    __try {
+        DWORD tr = *(volatile DWORD*)(0x7EFA08 + 0x238);
+        for (int guard = 0; tr && tr != 0x7EFA08 && guard < 8192; ++guard, tr = *(volatile DWORD*)(tr + 0x238)) {
+            float x = *(volatile float*)(tr + 0x1C), y = *(volatile float*)(tr + 0x20), z = *(volatile float*)(tr + 0x24);
+            bool hit = false;
+            for (int k = 0; k < 23 && !hit; ++k)
+                hit = fabsf(x - kHookTrig[k][0]) < 0.25f && fabsf(y - kHookTrig[k][1]) < 0.25f && fabsf(z - kHookTrig[k][2]) < 0.25f;
+            if (!hit) continue;
+            ++found;
+            volatile int* mx = (volatile int*)(tr + 0x250); int fired = *(volatile int*)(tr + 0x24C);
+            if (!g_hookKillOn && *mx != 0) { *mx = 0; ++changed; }
+            else if (g_hookKillOn && *mx == 0 && fired == 0) { *mx = 1; ++changed; }
+        }
+    } __except (1) { found = -1; }
+    if (found != lastFound || (found > 0 && (int)g_hookKillOn != lastState) || changed) {
+        if (found > 0 || lastFound > 0)
+            Log("hook kill: %d hook spot trigger(s) in this level - meat hook kill %s%s", found < 0 ? 0 : found,
+                g_hookKillOn ? "ON (Extended)" : "OFF (Original)", changed ? " (switched now)" : "");
+        lastFound = found; lastState = g_hookKillOn;
+    }
+}
+// v1.28 (Deck: a fat thug clipped the rack bar - in test 12 fat thugs sat right): env_kills.tbl keeps ONE victim
+// animation per group - the parser 0x4D63B7 stores every non-Punisher $Skel entry in the same slot (record +0x5C +
+// 2*(0x1C + action)), so the last entry (male_ek_hookkill = normal thugs 6 cm deeper) played for fat thugs too. While
+// the player holds a thug as a shield (+0x878, v1.33 - not +0x87C) in Meat1, the "Meat Hook Impale" group's victim slot is set to the
+// original male_ek_tikikill.rfa for the fat models (entity.tbl: fat_male_standard) and to the hook anim for everyone
+// else - the kill starts from the shield, so the slot is right when it starts. Anim id = (0x530B50(name) - 0xC9C988) / 0x48.
+// v1.34 (Deck v1.33: with the runtime-looked-up tiki id 336 the fat thug stayed in the hostage pose - that id is not
+// the one the level loaded): the env_kills.tbl parser's write of a victim anim slot (0x4D64A5, mov [ecx+edx*2+0x5C],
+// ax) is detoured; when a slot that already holds an anim is overwritten (the Meat Hook group: fat entry first, then
+// male_standard), the FIRST id is remembered = the fat thugs' anim exactly as the level loaded it.
+static void PatchJmpOrCall(DWORD at, BYTE op, void* to, int total);
+struct AnimAlt { DWORD rec; int idx; int first; };
+static AnimAlt g_animAlt[16]; static int g_animAltN = 0;
+static void __cdecl AnimSlotRecord(DWORD rec, int idx, int id)
+{
+    __try {
+        int prev = *(volatile WORD*)(rec + 0x5C + idx * 2);
+        if (idx >= 0x1C && prev != 0 && prev != 0xFFFF && prev != (id & 0xFFFF)) {
+            AnimAlt a = { rec, idx, prev };
+            if (g_animAltN < 16) g_animAlt[g_animAltN++] = a; else { memmove(g_animAlt, g_animAlt + 1, sizeof(AnimAlt) * 15); g_animAlt[15] = a; }
+        }
+    } __except (1) {}
+}
+static int AnimAltFor(DWORD rec, int idx)
+{
+    for (int i = g_animAltN - 1; i >= 0; --i) if (g_animAlt[i].rec == rec && g_animAlt[i].idx == idx) return g_animAlt[i].first;
+    return -1;
+}
+static DWORD kAnimSlotRet = 0x4D64AA;
+__declspec(naked) static void AnimSlotStub()   // at 0x4D64A5: ecx = record, edx = slot*0x1C + action, ax = anim id
+{
+    __asm {
+        pushad
+        movzx eax, ax
+        push eax
+        push edx
+        push ecx
+        call AnimSlotRecord
+        add  esp, 12
+        popad
+        mov  word ptr [ecx + edx*2 + 0x5C], ax
+        jmp  dword ptr [kAnimSlotRet]
+    }
+}
+static void InstallAnimSlotCapture()
+{
+    static const BYTE o[5] = { 0x66, 0x89, 0x44, 0x51, 0x5C };
+    if (memcmp((void*)0x4D64A5, o, 5)) { Log("hook kill: kill table anim write not as expected - fat thug anim off"); return; }
+    PatchJmpOrCall(0x4D64A5, 0xE9, (void*)AnimSlotStub, 5);
+    Log("hook kill: kill table anim capture installed");
+}
+static const char* kFatThugs[] = { "AG_Gnucci1", "AG_Yakuza1", "EL_Gnucci1", "IN_Truck_Driver1", "MC_Carlo_Gnucci", "MC_Micky_Ducka" };
+static void HookAnimTick()
+{
+    static DWORD rec = 0; static volatile WORD* slot = nullptr; static int hookId = -1, tikiId = -1, lastWant = -2;
+    __try {
+        // v1.31 (Deck: v1.28 never found the group - records are matched by ORDINAL, record +0 = ordinal from
+        // 0x4D1450(name), as EnvFxTick does; +4 is not the name)
+        int n = *(volatile int*)0x7E2E14; if (n <= 0 || n > 64) { rec = 0; slot = nullptr; return; }
+        static int ord = -1; static DWORD ordAt = 0;
+        if (ord < 0 || GetTickCount() - ordAt > 3000) { ord = ((int (__cdecl*)(const char*))0x4D1450)("Meat Hook Impale"); ordAt = GetTickCount(); }
+        if (ord < 0) { rec = 0; slot = nullptr; return; }
+        DWORD found = 0;
+        for (int i = 0; i < n; ++i) { DWORD r = *(volatile DWORD*)(0x7E2DC0 + i * 4); if (r && *(volatile int*)r == ord) { found = r; break; } }
+        {   // v1.31 diag: once per level - the level's group records (ordinals) and the hook group's ordinal
+            static DWORD lastFirst = 1;
+            DWORD first = *(volatile DWORD*)0x7E2DC0;
+            if (first != lastFirst) {
+                lastFirst = first; char b[256]; int o = snprintf(b, sizeof(b), "hook kill: %d kill group record(s), ordinals", n);
+                for (int i = 0; i < n && i < 24 && o < 230; ++i) { DWORD r = *(volatile DWORD*)(0x7E2DC0 + i * 4); o += snprintf(b + o, sizeof(b) - o, " %d", r ? *(volatile int*)r : -1); }
+                Log("%s; 'Meat Hook Impale' = %d%s", b, ord, found ? " (found)" : "");
+            }
+        }
+        if (found != rec) {                                  // (re)find the group after a level load
+            rec = found; slot = nullptr; lastWant = -2;
+            if (!rec) return;
+            int act = -1;
+            for (int i = 0; i < 0x1C; ++i) { const char* a = *(const char**)(0x6673A0 + i * 4); if (a && !strcmp(a, "int_amove_start")) { act = i; break; } }
+            if (act < 0) { rec = 0; return; }
+            slot = (volatile WORD*)(rec + 0x5C + 2 * (0x1C + act));
+            hookId = (short)*slot;
+            DWORD t = ((DWORD (__cdecl*)(const char*))0x530B50)("male_ek_tikikill.rfa");
+            int runtimeId = t ? (int)((t - 0xC9C988) / 0x48) : -1;
+            tikiId = AnimAltFor(rec, 0x1C + act);               // v1.34: the id the level loaded (captured at parse)
+            if (tikiId == runtimeId || tikiId == hookId) tikiId = -1;   // same as v1.33's failing id -> stay off
+            Log("hook kill: anim ids - normal thugs %d (hook), fat thugs %d (from the table load; runtime lookup %d)%s", hookId, tikiId, runtimeId,
+                tikiId < 0 ? " - no separate fat anim: fat thugs keep the hook anim" : "");
+        }
+    } __except (1) { static int e1 = 0; if (e1++ < 3) Log("hook kill: anim - group lookup raised an exception"); rec = 0; slot = nullptr; return; }
+    // v1.32 (Deck v1.31: the old single __try reset everything every frame - "anim ids" logged 16 000 times, the swap
+    // never ran): each step guarded on its own; a bad / stale shield handle only skips this frame
+    if (!slot || tikiId < 0 || hookId < 0) return;
+    if (!g_holdingHostage) return;                                  // only while really holding a human shield
+    char en[40] = ""; bool fat = false;
+    __try {
+        DWORD pl = *(volatile DWORD*)0x6B70FC; if (!pl) return;
+        DWORD h = *(volatile DWORD*)(pl + 0x878);   // v1.33: +0x878 = the thug in the shield now (+0x87C = the last corpse)
+        DWORD ve = (h && h != 0xFFFFFFFF) ? ((DWORD (__cdecl*)(DWORD))0x4A8D20)(h) : 0;
+        if (!ve) return;
+        const char* q = *(const char* volatile*)(ve + 0x260); int i = 0;
+        if ((DWORD)q > 0x10000) {
+            // info record +0 = the entity name, inline
+            for (; i < 39 && q[i] >= 32 && q[i] < 127; ++i) en[i] = q[i];
+        }
+        en[i] = 0;
+    } __except (1) { return; }
+    for (const char* f : kFatThugs) if (en[0] && !_stricmp(en, f)) fat = true;
+    int want = fat ? tikiId : hookId;
+    __try {
+        if ((short)*slot != want) {
+            DWORD old; VirtualProtect((void*)slot, 2, PAGE_READWRITE, &old);
+            *slot = (WORD)want;
+        }
+    } __except (1) { static int e2 = 0; if (e2++ < 3) Log("hook kill: anim - writing the victim anim slot failed"); return; }
+    if (want != lastWant) { lastWant = want; Log("hook kill: holding %s - %s anim ready (slot now %d)", en[0] ? en : "?", fat ? "fat (tiki)" : "normal (hook)", (int)(short)*slot); }
+}
+// v1.37 DIAG (random kills 10 cm too deep, ~1 in 5, fixed at the stab): from the moment the player holds a shield in
+// Meat1 until the stab, every 100 ms: Punisher x z facing, and the thug's offset in the PUNISHER's frame (forward /
+// side) + his facing. Printed at the stab (or when the hold ends) as "hook kill: approach ..." lines.
+static char g_apSmp[60][48]; static int g_apN = 0; static DWORD g_apLast = 0; static bool g_apOn = false;
+static volatile bool g_apStab = false;                        // set by HookWatchTick at the stab
+static void g_apStabSet() { g_apStab = true; }
+static void HookApproachTick()
+{
+    DWORD now = GetTickCount();
+    bool holding = g_holdingHostage;
+    if (!g_apOn) {
+        if (!holding) return;
+        bool area = false; __try { area = HookArea(); } __except (1) {}
+        if (!area) return;                                    // only at the Meat1 hooks
+        g_apOn = true; g_apN = 0; g_apLast = 0; g_apStab = false;
+    }
+    bool done = g_apStab || g_apN >= 60 || (!holding && !g_hookWatchV && g_apN > 0 && now - g_apLast > 3000);
+    if (done) {
+        if (g_apN) {
+            Log("hook kill: approach every 100 ms (Punisher x z yaw | thug forward side yaw, in the Punisher's frame)%s", g_apStab ? " - up to the stab" : "");
+            char line[400];
+            for (int i = 0; i < g_apN; i += 6) {
+                int o = 0; line[0] = 0;
+                for (int k = i; k < g_apN && k < i + 6; ++k) o += snprintf(line + o, sizeof(line) - o, " [%s]", g_apSmp[k]);
+                Log("  %s", line);
+            }
+        }
+        g_apOn = false; g_apN = 0; g_apStab = false; return;
+    }
+    if (now - g_apLast < 100) return;
+    g_apLast = now;
+    __try {
+        DWORD pl = *(volatile DWORD*)0x6B70FC; if (!pl) return;
+        DWORD h = g_hookWatchV ? g_hookWatchV : *(volatile DWORD*)(pl + 0x878);   // the kill victim once it started
+        DWORD ve = (h && h != 0xFFFFFFFF) ? ((DWORD (__cdecl*)(DWORD))0x4A8D20)(h) : 0;
+        volatile float* R = (volatile float*)(pl + 0x28);
+        float px = *(volatile float*)(pl + 0x1C), pz = *(volatile float*)(pl + 0x24), fx = R[6], fz = R[8];
+        float pyaw = atan2f(fx, fz) * 57.2958f;
+        if (g_apN >= 60) return;
+        if (ve) {
+            float dx = *(volatile float*)(ve + 0x1C) - px, dz = *(volatile float*)(ve + 0x24) - pz;
+            volatile float* V = (volatile float*)(ve + 0x28);
+            snprintf(g_apSmp[g_apN], 48, "%.2f %.2f %.0f | %.2f %.2f %.0f", px, pz, pyaw, dx * fx + dz * fz, dx * fz - dz * fx, atan2f(V[6], V[8]) * 57.2958f);
+        } else snprintf(g_apSmp[g_apN], 48, "%.2f %.2f %.0f | -", px, pz, pyaw);
+        ++g_apN;
+    } __except (1) {}
+}
+static int g_splatTest = -1;   // v1.45 dev: [Developer] SplatTest=1 casts the spike splat onto the floor 1 m ahead (laptop check)
+static void SplatTestTick()
+{
+    if (g_splatTest < 0) { char di[MAX_PATH]; snprintf(di, MAX_PATH, "%s\\ExtendedCut.ini", g_dir); g_splatTest = GetPrivateProfileIntA("Developer", "SplatTest", 0, di); }
+    if (g_splatTest != 1) return;
+    static DWORD next = 0; DWORD now = GetTickCount();
+    if (!next) next = now + 60000;
+    if ((int)(now - next) < 0) return;
+    next = now + 4000;
+    __try {
+        DWORD pl = *(volatile DWORD*)0x6B70FC; if (!pl) return;
+        volatile float* R = (volatile float*)(pl + 0x28);
+        static float pos[3], dir[3] = { 0.0f, -1.0f, 0.0f };
+        pos[0] = *(volatile float*)(pl + 0x1C) - R[6] * 1.5f; pos[1] = *(volatile float*)(pl + 0x20) + 0.6f; pos[2] = *(volatile float*)(pl + 0x24) - R[8] * 1.5f;
+        volatile float* T = (volatile float*)0x61F188; float o0 = T[0], o1 = T[4], o2 = T[8];
+        T[0] = 0.9f; T[4] = 0.9f; T[8] = 1.1f;   // test: big, to see it (still not visible on the laptop)
+        *(volatile int*)0x6D8738 = *(volatile int*)0x676BCC;
+        auto countW = []() -> int { int c = 0; DWORD h = *(volatile DWORD*)0x68AA38, r = h; while (r && c < 5000) { ++c; r = *(volatile DWORD*)(r + 0xD0); if (r == h) break; } return c; };
+        int c0 = countW();
+        ((void (__cdecl*)(int, float*, float*))0x41F0F0)(0, pos, dir);
+        int c1 = countW();
+        T[0] = o0; T[4] = o1; T[8] = o2;
+        Log("splat test at %.2f %.2f %.2f - world decals %d -> %d, tex %08X %08X %08X", pos[0], pos[1], pos[2], c0, c1,
+            *(volatile DWORD*)0x6D8708, *(volatile DWORD*)0x6D870C, *(volatile DWORD*)0x6D8710);
+        {   DWORD h = *(volatile DWORD*)0x68AA38;
+            if (h) { volatile float* f = (volatile float*)h;
+                Log("splat test: head record %08X: %.2f %.2f %.2f | %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f | +1C %08X +20 %08X +C4 %08X",
+                    h, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], *(volatile DWORD*)(h + 0x1C), *(volatile DWORD*)(h + 0x20), *(volatile DWORD*)(h + 0xC4));
+                DWORD pl = *(volatile DWORD*)0x6B70FC; volatile float* R2 = (volatile float*)(pl + 0x28);
+                Log("splat test: Punisher at %.2f %.2f %.2f, rows %.2f %.2f %.2f / %.2f %.2f %.2f", *(volatile float*)(pl + 0x1C), *(volatile float*)(pl + 0x20), *(volatile float*)(pl + 0x24), R2[0], R2[1], R2[2], R2[6], R2[7], R2[8]); } }
+        {   // diag: each gate of 0x41F0F0
+            int gore = -9, room = -9; char ok = -9;
+            __try { gore = ((int (__cdecl*)())0x462170)(); } __except (1) { gore = -7; }
+            int tmr = *(volatile int*)0x6D8738, now2 = *(volatile int*)0x676BCC;
+            static float a0[3], a1[3]; static BYTE hit[256];
+            for (int k = 0; k < 3; ++k) { a0[k] = pos[k]; a1[k] = pos[k] + dir[k] * 0.9f; }
+            __try { ((void (__cdecl*)())0x495310)(); } __except (1) { Log("splat diag: 495310 exception"); }
+            __try { ok = ((char (__cdecl*)(float*, float*, BYTE*, int))0x544240)(a0, a1, hit, 0); } __except (1) { ok = -7; }
+            float* hp = (float*)hit;
+            __try { room = ((int (__cdecl*)(float*))0x4A2800)(hp); } __except (1) { room = -7; }
+            Log("splat diag: gore %d, timer %d now %d, ray %d hit %.2f %.2f %.2f (+12: %.2f %.2f %.2f), room %08X",
+                gore, tmr, now2, (int)ok, hp[0], hp[1], hp[2], hp[3], hp[4], hp[5], room);
+        }
+    } __except (1) { Log("splat test raised an exception"); }
+}
+static void HookFxTick()
+{
+    SplatTestTick();                                             // v1.45 dev
+    HookAnimTick();                                              // v1.28
+    if (*(volatile DWORD*)0x7E2E14) HookApproachTick();          // v1.37 diag
+    HookWatchTick();                                             // v0.84.3
+    HookDepthTick();                                             // v0.84.7
+    HookTriggersTick();                                          // v0.85
+    if (!g_hookFxN) return;
+    DWORD now = GetTickCount();
+    for (int i = 0; i < g_hookFxN; ) {
+        HookFx e = g_hookFx[i];
+        if ((int)(now - e.due) < 0) { ++i; continue; }
+        g_hookFx[i] = g_hookFx[--g_hookFxN];
+        __try {
+            DWORD ent = ((DWORD (__cdecl*)(DWORD))0x4A8D20)(e.handle);
+            // v0.84.5: ~1.4 s after the stab the living thug becomes a corpse. v0.84.10: only early on (the drip / pool run
+            // for minutes; a corpse the game removed later must not jump to a newer kill's corpse)
+            if (!ent && (e.kind == 7 ? e.n < 10 : e.kind == 3 ? e.n == 0 : true)) {
+                DWORD pl = *(volatile DWORD*)0x6B70FC;
+                DWORD c = pl ? *(volatile DWORD*)(pl + 0x87C) : 0;
+                if (c && c != 0xFFFFFFFF && c != g_hookOldCorpse) ent = ((DWORD (__cdecl*)(DWORD))0x4A8D20)(c);
+                if (ent) { for (int k = 0; k < g_hookFxN; ++k) if (g_hookFx[k].handle == e.handle) g_hookFx[k].handle = c; e.handle = c; }
+            }
+            if (!ent) { Log("hook kill: victim gone"); continue; }
+            if (e.kind == 2) continue;                                       // v0.84.2: the game drops are off
+            if (*(volatile int*)0x666DF8 >= 0x38 && e.kind != 2) continue;   // keep 8 of the 64 effect slots free
+            DWORD room = *(volatile DWORD*)(ent + 0x98);
+            typedef int (__cdecl* Spawn_t)(int, DWORD, DWORD, DWORD, DWORD, DWORD, int, DWORD);
+            int skel = *(volatile int*)(ent + 0x248);
+            if (e.kind == 0) {
+                // v0.84.5: the neck point of the LIVING thug was 0 (wrong) and the corpse swap broke it - spawn at the
+                // wound itself: head bone - 20 cm up, + 14 cm forward (the hook comes out of the upper chest)
+                // v0.84.7: the exit wound = the chest bone, 10 cm up (the hook is at 2.0 m, spine1 at ~1.9) + 14 cm out
+                // the front along the body's facing (test 7: head-based points sat behind the hook, in the rack)
+                static float pos[3]; float fw[3];
+                if (g_hookWoundId < 0 || !HookBone(ent, "male-spine1", 0, 0, pos)) continue;
+                HookFloorFwd(ent, fw); pos[0] += fw[0] * 0.14f; pos[1] += 0.10f; pos[2] += fw[2] * 0.14f;
+                int r = ((Spawn_t)0x40E5C0)(g_hookWoundId, room, (DWORD)pos, ent + 0x28, 0, 0xFFFFFFFF, -1, 0xFFFFFFFF);
+                if (GoreLogOk()) Log("hook kill: wound spurt at %.2f %.2f %.2f -> %d", pos[0], pos[1], pos[2], r);
+            } else if (e.kind == 4) {
+                // v0.84.8: as the game spawns a quick-kill +Effect (0x4CBFBD): at the victim, his orientation, parented
+                // to him on his skeleton's blood point ([0x6B7108 + skel * 0x2D0 + 0xD4]); where the spray comes out
+                // is authored in qk_gullet.vfx
+                if (g_hookSprayId < 0 || skel < 0) { Log("hook kill: qk_gullet not available (id %d)", g_hookSprayId); continue; }
+                // v0.84.9: exactly as 0x4CBF98..0x4CBFD1: point = [[ent + 0x260] + 0xD4], LAST argument -1 (v0.84.8
+                // passed the handle there -> exception every time, no spray), then effect +0x84 |= 0x2000
+                DWORD si = *(volatile DWORD*)(ent + 0x260);
+                int point = si ? *(volatile int*)(si + 0xD4) : -1;
+                DWORD h = *(volatile DWORD*)(ent + 0x14);
+                Log("hook kill: qk_gullet id %d on %08X, point %d", g_hookSprayId, h, point);
+                int r = ((Spawn_t)0x40E5C0)(g_hookSprayId, room, ent + 0x1C, ent + 0x28, 0, h, point, 0xFFFFFFFF);
+                DWORD eo = ((DWORD (__cdecl*)(DWORD))0x4A8D20)((DWORD)r);
+                if (eo) *(volatile DWORD*)(eo + 0x84) |= 0x2000;
+                Log("hook kill: qk_gullet spray -> %d", r);
+            } else if (e.kind == 7) {
+                // v0.84.10: one drip from 25 cm in front of the chest bone, 5 cm below it; splash on the floor every 3rd.
+                // Fast at first, then slower: 20 x 0.35 s, 40 x 0.9 s, 40 x 2 s (~2 minutes)
+                static float dp[3], fp[3]; float fw[3];
+                if (g_hookDripId < 0 || !HookBone(ent, "male-spine1", 0, 0, dp)) { if (!e.n) Log("hook kill: no drip (id %d)", g_hookDripId); continue; }
+                // v0.84.11 (test 11 screens: the drip column started at head height, a bit out in front of him): the
+                // effect emits ~0.4 m above where it is placed -> 45 cm below the chest bone, 18 cm out (chest surface)
+                // v1.44 (Deck screen 182053: on the tiki torch the spike comes out ~17 cm higher than the hook, up by the
+                // collar - the drip started below it, in front of the belly): tiki drips start 17 cm higher
+                // v1.46 (user: "set the blood drip closer to the stab wound"): tiki drips 13 cm out (on the chest at the
+                // wound, not out on the spike) and 2 cm lower, so they start right under the wound
+                {   float o = e.tiki ? 0.13f : 0.18f;
+                    HookFloorFwd(ent, fw); dp[0] += fw[0] * o; dp[2] += fw[2] * o; dp[1] -= e.tiki ? 0.30f : 0.45f; }
+                int r = ((Spawn_t)0x40E5C0)(g_hookDripId, room, (DWORD)dp, ent + 0x28, 0, 0xFFFFFFFF, -1, 0xFFFFFFFF);
+                if (g_hookSplashId >= 0 && e.n % 3 == 0) {
+                    DWORD pl = *(volatile DWORD*)0x6B70FC;
+                    fp[0] = dp[0]; fp[2] = dp[2]; fp[1] = e.floorY > -999.0f ? e.floorY : pl ? *(volatile float*)(pl + 0x20) : 0.0f;
+                    ((Spawn_t)0x40E5C0)(g_hookSplashId, room, (DWORD)fp, ent + 0x28, 0, 0xFFFFFFFF, -1, 0xFFFFFFFF);
+                }
+                if (e.n < 3 || e.n % 20 == 0) Log("hook kill: chest drip %d at %.2f %.2f %.2f -> %d", e.n, dp[0], dp[1], dp[2], r);
+                if (e.n < 100) HookPush(GetTickCount() + (e.n < 20 ? 350 : e.n < 60 ? 900 : 2000), e.handle, 7, e.n + 1, e.floorY, e.tiki);
+            } else if (e.kind == 8) {
+                // v1.45 (user, Deck screen 185029: "paint the tip of the spike with blood"): the torch is level
+                // geometry, so it can carry a floor / wall blood splat. 0x41F0F0(class, pos, dir) = the game's
+                // splatter behind a shot victim: a ray from pos along dir (length [0x61F188 + class*4]) and, where it
+                // hits level geometry, a world decal of size rand([0x61F198], [0x61F1A8]) * 0.5 (gore option on, at
+                // most one per 250 ms). Class 0's ray / sizes are made spike-sized for the call and put back: a ray
+                // straight down from above the spike, in front of the exit wound (the drip spot, user: "on the spike"),
+                // 30 / 38 cm out from the chest bone. A miss paints nothing (the ray stops above the floor).
+                static float sp[3], pos[3], dir[3] = { 0.0f, -1.0f, 0.0f }; float fw[3];
+                if (!HookBone(ent, "male-spine1", 0, 0, sp)) continue;
+                HookFloorFwd(ent, fw);
+                float out = e.n == 0 ? 0.30f : 0.38f;
+                pos[0] = sp[0] + fw[0] * out; pos[1] = sp[1] + 0.55f; pos[2] = sp[2] + fw[2] * out;
+                volatile float* T = (volatile float*)0x61F188;
+                float o0 = T[0], o1 = T[4], o2 = T[8];
+                DWORD before = 0; __try { before = *(volatile DWORD*)0x6D8738; } __except (1) {}
+                T[0] = 0.9f; T[4] = 0.14f; T[8] = 0.22f;
+                // its 250 ms throttle [0x6D8738] starts at -1 (= never) and blocks every call until the game first sets
+                // it - set it to "now" so this one goes through (the call itself sets the next 250 ms)
+                __try { *(volatile int*)0x6D8738 = *(volatile int*)0x676BCC; } __except (1) {}
+                __try { ((void (__cdecl*)(int, float*, float*))0x41F0F0)(0, pos, dir); } __except (1) { Log("tiki kill: spike splat raised an exception"); }
+                T[0] = o0; T[4] = o1; T[8] = o2;
+                (void)before;
+                Log("tiki kill: spike blood splat %d - ray down from %.2f %.2f %.2f", e.n, pos[0], pos[1], pos[2]);
+            } else if (e.kind == 5 || e.kind == 6) {
+                // v0.84.9: free-standing game blood drops (as the game calls 0x41F5C0(-1, -1, &pos, n, 50 ms, 0.85, -1))
+                // from 30 cm out in front of the chest bone (clear of the hook tip, which is ~23 cm out) at chest height
+                static float dp[3]; float fw[3];
+                if (!HookBone(ent, "male-spine1", 0, 0, dp)) continue;
+                HookFloorFwd(ent, fw); dp[0] += fw[0] * 0.30f; dp[2] += fw[2] * 0.30f; dp[1] -= 0.05f;
+                int n = e.kind == 5 ? 40 : 25, ms = e.kind == 5 ? 70 : 160;
+                ((void (__cdecl*)(DWORD, int, float*, int, int, DWORD, int))0x41F5C0)(0xFFFFFFFF, -1, dp, n, ms, 0x3F59999A, -1);
+                Log("hook kill: chest drip %d drops, %d ms apart, from %.2f %.2f %.2f", n, ms, dp[0], dp[1], dp[2]);
+            } else if (e.kind == 1) {
+                static float pos[3];
+                if (g_hookMouthId < 0 || !HookMouth(ent, pos)) { Log("hook kill: mouth position not found"); continue; }
+                int r = ((Spawn_t)0x40E5C0)(g_hookMouthId, room, (DWORD)pos, ent + 0x28, 0, 0xFFFFFFFF, -1, 0xFFFFFFFF);
+                if (GoreLogOk()) Log("hook kill: mouth spurt at %.2f %.2f %.2f -> %d", pos[0], pos[1], pos[2], r);
+            } else if (e.kind == 3) {
+                // the bear trap's effect is placed at the victim's feet with his head ~1.45 m above (Mansion3,
+                // male_ek_beartrap.rfa end pose): put it on the floor (the Punisher's feet height) under the head
+                // v0.84.7 (test 7: the pool showed BEHIND the wall): env_kill_bear_trp is made for the Mansion bear
+                // trap, spawned at the victim's feet when that kill starts; the victim then steps ~1.2 m forward into
+                // the trap (FK male_ek_beartrap: feet (-0.05, 0.03) at the start, trap foot ~(0.10, 1.25) at the end),
+                // so its drips + pool sit at model (+0.15, +1.22) from where it is spawned, turned with the body.
+                // Spawn it that much back, so the pool lands on the floor 20 cm in front of the chest.
+                static float pos[3]; float sp[3], fw[3];
+                if (g_hookPoolId < 0) { Log("hook kill: env_kill_bear_trp not known (effect id %d)", g_hookPoolId); continue; }
+                if (!HookBone(ent, "male-spine1", 0, 0, sp)) continue;
+                HookFloorFwd(ent, fw);
+                DWORD pl = *(volatile DWORD*)0x6B70FC;
+                volatile float* R = (volatile float*)(ent + 0x28);
+                // v0.84.8 (test 8: pool still touching the rack, the drip falling beside him on the wall side):
+                // 30 cm further out, and the sideways part turned the other way (it doubled instead of cancelling)
+                pos[0] = sp[0] + fw[0] * kHookPoolOut - (kHookPoolSide * R[0] + 1.22f * R[6]);
+                pos[2] = sp[2] + fw[2] * kHookPoolOut - (kHookPoolSide * R[2] + 1.22f * R[8]);
+                pos[1] = e.floorY > -999.0f ? e.floorY : pl ? *(volatile float*)(pl + 0x20) : *(volatile float*)(ent + 0x20);
+                Log("hook kill: pool aimed at %.2f %.2f (chest %.2f %.2f) - spawned at %.2f %.2f", sp[0] + fw[0] * kHookPoolOut,
+                    sp[2] + fw[2] * kHookPoolOut, sp[0], sp[2], pos[0], pos[2]);
+                int r = ((Spawn_t)0x40E5C0)(g_hookPoolId, room, (DWORD)pos, ent + 0x28, 0, 0xFFFFFFFF, -1, 0xFFFFFFFF);
+                Log("hook kill: bear-trap drip / pool at %.2f %.2f %.2f -> %d (%d)", pos[0], pos[1], pos[2], r, e.n);
+                // v0.84.10 (user: the puddle disappears fast - the effect lasts ~28 s): spawn it again every 20 s, 5 more times
+                if (e.n < 5) HookPush(GetTickCount() + 20000, e.handle, 3, e.n + 1, e.floorY, e.tiki);
+            } else {
+                if (skel < 0) continue;
+                int point = *(volatile int*)(0x6B7108 + skel * 0x2D0 + 0xD4);
+                static float pos[3];
+                for (int k = 0; k < 3; ++k) pos[k] = *(volatile float*)(ent + 0x1C + 4 * k);
+                ((void (__cdecl*)(DWORD, int, float*, int, int, DWORD, int))0x41F5C0)(e.handle, point, pos, 60, 70, 0x3F733333, -1);
+                Log("hook kill: floor drops started (blood point %d, 60 drops, 70 ms apart)", point);
+            }
+        } __except (1) {
+            Log("hook kill: effect %d (step %d) raised an exception - skipped", e.kind, e.n);
+            // v1.43 (Deck: the drip stopped after an exception): the drip / pool chains go on with their next step
+            if (e.kind == 7 && e.n < 100) HookPush(GetTickCount() + 900, e.handle, 7, e.n + 1, e.floorY, e.tiki);
+            if (e.kind == 3 && e.n < 5) HookPush(GetTickCount() + 20000, e.handle, 3, e.n + 1, e.floorY, e.tiki);
+        }
+    }
+}
 // every frame: a melee-item quick kill STARTS when [0x7D112C] (its env-kill group) is set with a new victim in the
 // Punisher's quick-kill victim handle (+0x878). The hit times are frames from the start of the animation.
 static void PropStartPoll()
 {
-    if (!g_goreKillWounds) return;
+    if (!g_goreKillWounds && !g_envKillBlood) return;   // v0.86: the hook kill's blood has its own switch
     DWORD g = 0, v = 0, ph = 0;
     __try {
         g = *(volatile DWORD*)0x7D112C;
@@ -2448,10 +3453,13 @@ static void PropStartPoll()
     bool alive = false; __try { alive = ((DWORD (__cdecl*)(DWORD))0x4A8D20)(v) != 0; } __except (1) {}
     if (!alive) return;
     if (g) {
+        if (HookKillStart(g, v)) return;                    // v0.84: Meat1 hook kill (HookFire checks EnvKillBlood)
+        if (!g_goreKillWounds) return;
         int id = -1; const KillMarks* k = PropKillOf(g, &id);
         if (k) PropSchedule(g, k, id, v, "the start");
         return;
     }
+    if (!g_goreKillWounds) return;
     // v0.47: Slaughter Mode kills are timed from their start too (their grab-finish comes late, e.g. frame 108)
     char key[64]; DWORD rec = 0; QkKeyNow(key, sizeof(key), &rec);
     const KillMarks* k = KillMarksOf(key);
@@ -2622,6 +3630,594 @@ static void InstallAlwaysFlashbacks(const char* ini)
     } else Log("flashbacks: code at 004D09C1 not as expected - replay option off");
 }
 
+// ---------------------------------------------------------------- v1.10: Punisher outfit + PC skin (notes\COSTUME_LOADER_RESEARCH.md)
+// Every level file stores the Punisher's outfit: 0 jungle, 1 prison, 2 T-shirt, 3 trench coat (= the exe's table
+// 0x666E88; entity.tbl indices resolved at 0x4B9440 into 0x7CF7F0..0x7CF7FC). 0x495A45 reads it from the level,
+// 0x495A4A puts [0x7CF7F0 + i*4] into player +0x30 (old level versions: 0x495A5E -> trench coat). The exe runs
+// coat-only code when player +0x30 == trench (coat draw anims, 0x4B1DE0 ...) - so a T-shirt has to be the real
+// "punisher_tshirt" entity, not the T-shirt mesh inside the coat entity (Zoo test 1: shotgun / arm / rods / face).
+// [Costume] Outfit: 0 = the level's own, 1 = trench coat, 2 = T-shirt. A different outfit than the level's needs
+// that model, its face morphs and its textures somewhere the game finds them (level vpp or a global vpp); its
+// textures come from the bank ec_outfit_trench.peg / ec_outfit_tshirt.peg (loaded here, missing = skipped by the
+// game's own loader 0x50C8A0). Applies at the next level / checkpoint load.
+// [Costume] PcSkin: 0 = the game's choice, 1 = none, 2 = GS, 3 = 1990 (EB), 4 = WM -> [0x667618] + 0x278 (the exe's
+// "Unlock Skin" value: 1 GS / 2 EB / 3 WM, read at level load 0x49437F; only the T-shirt model wears it).
+int g_outfit = 0, g_pcSkin = 0;
+static volatile int g_outfitLevel = -1, g_outfitUsed = -1;
+static void PcSkinTick()   // every 1.5 s: the exe's skin value, read when a level loads
+{
+    if (g_pcSkin <= 0 || g_pcSkin > 4) return;
+    __try {
+        DWORD g = *(volatile DWORD*)0x667618;
+        if (g && *(volatile int*)(g + 0x278) != g_pcSkin - 1) {
+            Log("pc skin: %d -> %d (applies at the next level load)", *(volatile int*)(g + 0x278), g_pcSkin - 1);
+            *(volatile int*)(g + 0x278) = g_pcSkin - 1;
+        }
+    } __except (1) {}
+}
+
+static int __cdecl OutfitPick(int lvl)
+{
+    PcSkinTick();   // also here: the pad tick (every 1.5 s) only runs with a controller
+    int use = lvl;
+    if (g_outfit == 1) use = 3; else if (g_outfit == 2) use = 2;
+    if (use < 0 || use > 3) use = 3;
+    if (use != lvl && (use == 2 || use == 3)) {
+        const char* bank = use == 2 ? "ec_outfit_tshirt.peg" : "ec_outfit_trench.peg";
+        // v1.17: 0x50C8A0 is the game's bank UNLOAD by name (v1.10-v1.16 called it = the bank was never loaded; a picked
+        // costume hid that). Load = 0x50C910(name, 0, 0, -1, 1, 1, 0), the call the game uses for the PC-skin banks
+        // (0x49636E); id -1 = unloaded with the level's other banks at level end (0x494290).
+        auto bankIdx = [](const char* nm) -> int {   // loaded-bank table 0x811378 + i*0x24 (name first), count [0x83C3C8]
+            __try {
+                int n = *(volatile int*)0x83C3C8;
+                for (int i = 0; i < n && i < 0x80; ++i) if (!_strnicmp((const char*)(0x811378 + i * 0x24), nm, strlen(nm))) return i;
+            } __except (1) {}
+            return -1;
+        };
+        int before = bankIdx("ec_outfit_");
+        int r = -2;
+        __try { r = ((int (__cdecl*)(const char*, int, int, int, int, int, int))0x50C910)(bank, 0, 0, -1, 1, 1, 0); }
+        __except (1) { Log("outfit: loading %s failed", bank); }
+        Log("outfit: texture bank %s - in the bank table before %d, after %d (load call %d)", bank, before, bankIdx("ec_outfit_"), r);
+    }
+    static const char* nm[4] = { "jungle", "prison", "T-shirt", "trench coat" };
+    if (lvl != g_outfitLevel || use != g_outfitUsed)
+        Log("outfit: level wants %s, using %s", (lvl >= 0 && lvl <= 3) ? nm[lvl] : "?", nm[use]);
+    g_outfitLevel = lvl; g_outfitUsed = use;
+    return use;
+}
+static DWORD kOutfitRet1 = 0x495A5A, kOutfitRet2 = 0x495A6C;
+__declspec(naked) static void OutfitStub1()   // at 0x495A4A, eax = the level's outfit
+{
+    __asm {
+        push eax
+        call OutfitPick
+        add  esp, 4
+        mov  eax, dword ptr [eax*4 + 0x7CF7F0]
+        mov  ecx, dword ptr ds:[0x7CF804]
+        mov  dword ptr [ecx + 0x30], eax
+        jmp  dword ptr [kOutfitRet1]
+    }
+}
+__declspec(naked) static void OutfitStub2()   // at 0x495A5E, old level version = trench coat
+{
+    __asm {
+        push 3
+        call OutfitPick
+        add  esp, 4
+        mov  eax, dword ptr [eax*4 + 0x7CF7F0]
+        mov  edx, dword ptr ds:[0x7CF804]
+        mov  dword ptr [edx + 0x30], eax
+        jmp  dword ptr [kOutfitRet2]
+    }
+}
+// v1.11: with the T-shirt in a coat level the shotgun's left arm pointed away. pun.exe gives only the COAT Punisher
+// the player hold for long guns; every other entity gets the NPC hold (left hand pinned to the weapon's "grip_1" tag,
+// 0x416AB0 slots 5-7) at 0x4FEE47, 0x4FEFBC and 0x50543D (weapon types 0x1B / 0x20). Retail never shows a non-coat
+// Punisher with a shotgun. When the plugin changed the outfit, the player counts as "coat" at those three checks.
+static int __cdecl OutfitCoatLike(DWORD ent)
+{
+    __try {
+        DWORD info = *(volatile DWORD*)(ent + 0x260);
+        if (info == 0x6B7108 + *(volatile DWORD*)0x7CF7FC * 0x2D0) return 1;
+        if (g_outfitUsed >= 0 && g_outfitUsed != g_outfitLevel && ((bool (__cdecl*)(DWORD))0x416920)(ent)) return 1;
+    } __except (1) {}
+    return 0;
+}
+// v1.17 (Deck test: empty thigh holsters with the T-shirt in coat levels): the three sites are really the game's
+// HOLSTER code - 0x416AB0 hangs the holstered weapon mesh by its "grip_1" tag on prop slot 5 Prop_L_Hip / 6 Prop_R_Hip
+// (pistols) or 7 Prop-Rifle-Back (long gun); the coat Punisher skips it (his coat hides them). 0x4FEE47 = pistols only
+// -> no longer patched (pistols show in the T-shirt's thigh holsters again). 0x50543D -> only the long gun ([esi+0x4EC])
+// is skipped. 0x4FEFBC (long gun) stays as in v1.11. The stubs keep ecx (the game's code there does not touch it).
+static int __cdecl OutfitCoatLikeLong(DWORD ent, DWORD weapon)
+{
+    __try {
+        DWORD info = *(volatile DWORD*)(ent + 0x260);
+        if (info == 0x6B7108 + *(volatile DWORD*)0x7CF7FC * 0x2D0) return 1;   // the real coat: retail skip
+        if (g_outfitUsed >= 0 && g_outfitUsed != g_outfitLevel && ((bool (__cdecl*)(DWORD))0x416920)(ent)
+            && weapon && weapon == *(volatile DWORD*)(ent + 0x4EC)) return 1;    // changed outfit: long gun only
+    } __except (1) {}
+    return 0;
+}
+static DWORD kGripA_skip = 0x4FEE84, kGripA_npc = 0x4FEE61, kGripB_skip = 0x4FEFEC, kGripB_npc = 0x4FEFD8,
+             kGripC_skip = 0x5054A5, kGripC_npc = 0x505459;
+__declspec(naked) static void GripStubA()   // edi = entity
+{
+    __asm {
+        push edi
+        call OutfitCoatLike
+        add  esp, 4
+        test eax, eax
+        jz   npc
+        jmp  dword ptr [kGripA_skip]
+    npc:
+        jmp  dword ptr [kGripA_npc]
+    }
+}
+__declspec(naked) static void GripStubB()   // esi = entity
+{
+    __asm {
+        push ecx
+        push esi
+        call OutfitCoatLike
+        add  esp, 4
+        pop  ecx
+        test eax, eax
+        jz   npc
+        jmp  dword ptr [kGripB_skip]
+    npc:
+        jmp  dword ptr [kGripB_npc]
+    }
+}
+__declspec(naked) static void GripStubC()   // esi = entity (the weapon's owner), edi = weapon
+{
+    __asm {
+        push ecx
+        push edi
+        push esi
+        call OutfitCoatLikeLong
+        add  esp, 8
+        pop  ecx
+        test eax, eax
+        jz   npc
+        jmp  dword ptr [kGripC_skip]
+    npc:
+        jmp  dword ptr [kGripC_npc]
+    }
+}
+static void InstallOutfitGrip()
+{
+    static const BYTE a[26] = { 0xA1, 0xFC, 0xF7, 0x7C, 0x00, 0x8B, 0x8F, 0x60, 0x02, 0x00, 0x00, 0x69, 0xC0, 0xD0, 0x02, 0x00, 0x00,
+                                0x05, 0x08, 0x71, 0x6B, 0x00, 0x3B, 0xC8, 0x74, 0x23 };
+    static const BYTE b[28] = { 0x8B, 0x15, 0xFC, 0xF7, 0x7C, 0x00, 0x8B, 0x86, 0x60, 0x02, 0x00, 0x00, 0x69, 0xD2, 0xD0, 0x02, 0x00, 0x00,
+                                0x81, 0xC2, 0x08, 0x71, 0x6B, 0x00, 0x3B, 0xC2, 0x74, 0x14 };
+    static const BYTE c[28] = { 0x8B, 0x15, 0xFC, 0xF7, 0x7C, 0x00, 0x8B, 0x86, 0x60, 0x02, 0x00, 0x00, 0x69, 0xD2, 0xD0, 0x02, 0x00, 0x00,
+                                0x81, 0xC2, 0x08, 0x71, 0x6B, 0x00, 0x3B, 0xC2, 0x74, 0x4C };
+    if (memcmp((void*)0x4FEE47, a, 26) || memcmp((void*)0x4FEFBC, b, 28) || memcmp((void*)0x50543D, c, 28)) {
+        Log("outfit: long-gun hold checks not as expected - the T-shirt keeps the NPC hold"); return;
+    }
+    // v1.20 (Deck test: with the T-shirt in a coat level the long gun vanished instead of going on his back): all three
+    // holster checks are left as retail now - a non-coat Punisher holsters like in the T-shirt levels (pistols on the
+    // hips, long gun on the back). The stubs stay for reference.
+    (void)GripStubA; (void)GripStubB; (void)GripStubC;
+    Log("outfit: holster checks left as the game has them (T-shirt: pistols on the hips, long gun on the back)");
+}
+// ---------------------------------------------------------------- v1.12: costume loader (notes\COSTUME_LOADER_RESEARCH.md,
+// notes\PICKER_PLAN.md). <plugin folder>\Costumes\<name>\pun_tshirt_NN.dds / punps2_trenchNN.dds (any subset). The
+// game uploads every named texture through UploadSlot 0x519500(slot) (bank load, re-point, GetTexIDByName); our detour
+// makes the picture from the costume's .dds instead when a costume is picked (PC skins pun_(gs|eb|wm|bb)tshirt_NN_x
+// count as pun_tshirt_NN). Live switch = re-upload the costume slots. Pictures never enter the level pool.
+// Slot table 0x83C3D0 stride 0x2C: +0 name, +8 bank entry, +0x14 handle, +0x18 D3DFORMAT, +0x1C IDirect3DTexture8*,
+// +0x20 / +0x24 u / v scale, +0x28 byte. Bind cache 0x6767F8[4]. Device [0x913C48]. Placeholder handle [0x67668C].
+#ifndef MAKEFOURCC
+#define MAKEFOURCC(a, b, c, d) ((DWORD)(BYTE)(a) | ((DWORD)(BYTE)(b) << 8) | ((DWORD)(BYTE)(c) << 16) | ((DWORD)(BYTE)(d) << 24))
+#endif
+struct CostumeTex { int w = 0, h = 0, mips = 0; DWORD fmt = 0; std::vector<BYTE> data; bool tried = false, ok = false; };
+static std::vector<std::string> g_costumeNames; static std::vector<unsigned long long> g_fpTee, g_fpCoat;   // v1.23 look-alike fingerprints
+static void CostumeFingerprint(const char* folder, unsigned long long* tee, unsigned long long* coat);          // folders with at least one .dds, sorted
+int g_costumeSel = 0;                                    // 0 = level files (launcher), k = g_costumeNames[k-1]
+static char g_costumeWanted[96] = "";                    // [Costume] Costume = folder name (kept even when missing)
+static std::vector<std::pair<std::string, CostumeTex>> g_costumeCache;   // key -> picture of the current choice
+static char __cdecl Upload_Trampoline_Default(int) { return 0; }
+static char (__cdecl* g_origUpload)(int) = Upload_Trampoline_Default;
+static bool g_costumeHooked = false;
+static char g_costumeTestFrom[48] = "", g_costumeTestTo[32] = "";   // [Developer] CostumeTest = texture.tga>pun_tshirt_04
+static int g_costumeMaxSize = 4096;
+int g_costumeSkulls = 1;   // v1.19: [Costume] Skulls 1 = the in-game skulls follow the picked costume (its skull01 / skull_orng /
+                           // meters_skull .dds), 0 = keep what Apply wrote
+
+static bool CostumeKey(const char* nm, char* key)          // slot name -> "pun_tshirt_NN" / "punps2_trenchNN", or false
+{
+    if (!nm) return false;
+    char s[48]; int i = 0; for (; nm[i] && i < 47; ++i) s[i] = (char)tolower((unsigned char)nm[i]); s[i] = 0;
+    if (g_costumeTestFrom[0] && !strcmp(s, g_costumeTestFrom)) { strcpy(key, g_costumeTestTo); return true; }
+    auto two = [](const char* p) { return isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1]); };
+    if (!strncmp(s, "pun_tshirt_", 11) && two(s + 11) && !strcmp(s + 13, ".tga")) { memcpy(key, s, 13); key[13] = 0; return true; }
+    if (!strncmp(s, "punps2_trench", 13) && two(s + 13) && !strcmp(s + 15, ".tga")) { memcpy(key, s, 15); key[15] = 0; return true; }
+    if (g_costumeSkulls) {                                   // v1.19: in-game skulls
+        static const char* sk[4] = { "skull01_worn", "skull01", "skull_orng", "meters_skull" };
+        for (const char* k : sk) { size_t l = strlen(k); if (!strncmp(s, k, l) && !strcmp(s + l, ".tga")) { strcpy(key, k); return true; } }
+    }
+    // PC skins: pun_gstshirt_NN_x.tga etc.
+    if (!strncmp(s, "pun_", 4) && !strncmp(s + 6, "tshirt_", 7) && two(s + 13) && !strcmp(s + 15, "_x.tga")) {
+        snprintf(key, 16, "pun_tshirt_%c%c", s[13], s[14]); return true;
+    }
+    return false;
+}
+static void CostumeScan()
+{
+    g_costumeNames.clear();
+    char pat[MAX_PATH]; snprintf(pat, sizeof(pat), "%s\\Costumes\\*", g_dir);
+    WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pat, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
+            char p2[MAX_PATH]; snprintf(p2, sizeof(p2), "%s\\Costumes\\%s\\*.dds", g_dir, fd.cFileName);
+            WIN32_FIND_DATAA f2; HANDLE h2 = FindFirstFileA(p2, &f2);
+            if (h2 != INVALID_HANDLE_VALUE) { FindClose(h2); g_costumeNames.push_back(fd.cFileName); }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    std::sort(g_costumeNames.begin(), g_costumeNames.end(), [](const std::string& a, const std::string& b) { return _stricmp(a.c_str(), b.c_str()) < 0; });
+    g_fpTee.assign(g_costumeNames.size(), 0); g_fpCoat.assign(g_costumeNames.size(), 0);   // v1.23
+    for (size_t i = 0; i < g_costumeNames.size(); ++i) CostumeFingerprint(g_costumeNames[i].c_str(), &g_fpTee[i], &g_fpCoat[i]);
+    g_costumeSel = 0;
+    for (size_t i = 0; i < g_costumeNames.size(); ++i) if (!_stricmp(g_costumeNames[i].c_str(), g_costumeWanted)) g_costumeSel = (int)i + 1;
+    Log("costume: %d costume folder(s) in Costumes\\, picked: %s", (int)g_costumeNames.size(),
+        g_costumeSel ? g_costumeNames[g_costumeSel - 1].c_str() : (g_costumeWanted[0] ? "level files (the picked one is missing)" : "level files"));
+}
+// v1.23 (user: kits that differ only in the coat showed as the same costume several times while wearing the T-shirt):
+// every folder gets a fingerprint of its T-shirt pictures and of its coat pictures (file names + sizes + first / last
+// 4 KB). While a level runs with the T-shirt (coat), costumes with the same T-shirt (coat) pictures show ONCE in the
+// menu - the first by name, shown "Name (+N)" - and costumes without any picture for that outfit are skipped.
+static unsigned long long FpMix(unsigned long long h, const void* p, size_t n)
+{
+    const BYTE* b = (const BYTE*)p;
+    for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ULL; }
+    return h;
+}
+static void CostumeFingerprint(const char* folder, unsigned long long* tee, unsigned long long* coat)
+{
+    *tee = *coat = 0;
+    std::vector<std::string> files;
+    char pat[MAX_PATH]; snprintf(pat, sizeof(pat), "%s\\Costumes\\%s\\*.dds", g_dir, folder);
+    WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do files.push_back(fd.cFileName); while (FindNextFileA(h, &fd));
+    FindClose(h);
+    std::sort(files.begin(), files.end(), [](const std::string& a, const std::string& b) { return _stricmp(a.c_str(), b.c_str()) < 0; });
+    unsigned long long ht = 1469598103934665603ULL, hc = ht; int nt = 0, nc = 0;
+    for (auto& f : files) {
+        bool t = !_strnicmp(f.c_str(), "pun_tshirt_", 11), c = !_strnicmp(f.c_str(), "punps2_trench", 13);
+        if (!t && !c) continue;
+        char lo[64]; int i = 0; for (; f[i] && i < 63; ++i) lo[i] = (char)tolower((unsigned char)f[i]); lo[i] = 0;
+        char fp[MAX_PATH]; snprintf(fp, sizeof(fp), "%s\\Costumes\\%s\\%s", g_dir, folder, f.c_str());
+        unsigned long long x = FpMix(1469598103934665603ULL, lo, strlen(lo));
+        if (FILE* fh = fopen(fp, "rb")) {
+            // v1.30 (Deck: kits that differ only in the skull on the shirt were merged - v1.23 read only the first and
+            // last 4 KB, the skull sits in the middle): 64 slices of 1 KB spread over the whole file
+            BYTE buf[1024]; fseek(fh, 0, SEEK_END); long sz = ftell(fh); x = FpMix(x, &sz, sizeof(sz));
+            for (int k = 0; k < 64; ++k) {
+                long at = sz > 1024 ? (long)((long long)(sz - 1024) * k / 63) : 0;
+                fseek(fh, at, SEEK_SET); size_t r = fread(buf, 1, sizeof(buf), fh); x = FpMix(x, buf, r);
+                if (sz <= 1024) break;
+            }
+            fclose(fh);
+        }
+        if (t) { ht = FpMix(ht, &x, sizeof(x)); ++nt; } else { hc = FpMix(hc, &x, sizeof(x)); ++nc; }
+    }
+    *tee = nt ? ht : 0; *coat = nc ? hc : 0;
+}
+static int CostumeOutfitNow() { return (g_outfitUsed == 2 || g_outfitUsed == 3) ? g_outfitUsed : 0; }   // 2 T-shirt, 3 coat, 0 unknown
+static unsigned long long CostumeFp(int sel, int outfit)
+{
+    if (sel <= 0 || sel > (int)g_fpTee.size()) return 0;
+    return outfit == 2 ? g_fpTee[sel - 1] : g_fpCoat[sel - 1];
+}
+static bool CostumeShown(int sel)   // is this entry listed for the outfit he wears now?
+{
+    if (sel <= 0) return true;
+    int o = CostumeOutfitNow(); if (!o) return true;
+    unsigned long long f = CostumeFp(sel, o); if (!f) return false;                 // nothing for this outfit
+    // look-alikes: the one with the SHORTEST name stands for the group (usually the base kit), ties -> first by name
+    size_t L = g_costumeNames[sel - 1].size();
+    for (int k = 1; k <= (int)g_fpTee.size(); ++k) {
+        if (k == sel || CostumeFp(k, o) != f) continue;
+        size_t Lk = g_costumeNames[k - 1].size();
+        if (Lk < L || (Lk == L && k < sel)) return false;
+    }
+    return true;
+}
+static int CostumeSameCount(int sel)   // how many other costumes look the same for the current outfit
+{
+    int o = CostumeOutfitNow(); unsigned long long f = CostumeFp(sel, o); if (!o || !f) return 0;
+    int n = 0; for (int k = 1; k <= (int)g_fpTee.size(); ++k) if (k != sel && CostumeFp(k, o) == f) ++n;
+    return n;
+}
+static int CostumeStep(int sel, int dir)   // next listed entry (0 = level files), wraps round
+{
+    int cnt = (int)g_costumeNames.size() + 1;
+    for (int i = 0; i < cnt; ++i) { sel = ((sel + dir) % cnt + cnt) % cnt; if (CostumeShown(sel)) return sel; }
+    return 0;
+}
+static int CostumeCount(const char* folder, int* tee, int* coat)   // .dds files of one costume by kind
+{
+    *tee = *coat = 0;
+    char p[MAX_PATH]; snprintf(p, sizeof(p), "%s\\Costumes\\%s\\*.dds", g_dir, folder);
+    WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(p, &fd); int n = 0;
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do { ++n; if (!_strnicmp(fd.cFileName, "pun_tshirt_", 11)) ++*tee; else if (!_strnicmp(fd.cFileName, "punps2_trench", 13)) ++*coat; } while (FindNextFileA(h, &fd));
+    FindClose(h); return n;
+}
+static bool DdsLoad(const char* path, CostumeTex& t)
+{
+    FILE* f = fopen(path, "rb"); if (!f) return false;
+    std::vector<BYTE> b; fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    if (n > 128) { b.resize(n); if (fread(b.data(), 1, n, f) != (size_t)n) b.clear(); }
+    fclose(f);
+    if (b.size() < 128 || memcmp(b.data(), "DDS ", 4)) { Log("costume: %s is not a DDS file", path); return false; }
+    DWORD h = *(DWORD*)&b[12], w = *(DWORD*)&b[16], mips = *(DWORD*)&b[28], pff = *(DWORD*)&b[80], cc = *(DWORD*)&b[84],
+          bits = *(DWORD*)&b[88], rm = *(DWORD*)&b[92], am = *(DWORD*)&b[104];
+    if (!mips) mips = 1;
+    DWORD fmt = 0; int blk = 0;
+    if (pff & 4) {
+        if (cc == MAKEFOURCC('D', 'X', 'T', '1')) { fmt = cc; blk = 8; }
+        else if (cc == MAKEFOURCC('D', 'X', 'T', '3') || cc == MAKEFOURCC('D', 'X', 'T', '5')) { fmt = cc; blk = 16; }
+    } else if (bits == 32 && rm == 0x00FF0000) fmt = (am || (pff & 1)) ? 21 : 22;   // A8R8G8B8 / X8R8G8B8
+    if (!fmt) { Log("costume: %s - format not supported (use DXT1 / DXT5 / 32-bit)", path); return false; }
+    if (w < 4 || h < 4 || (int)w > g_costumeMaxSize || (int)h > g_costumeMaxSize || (blk && ((w | h) & 3))) {
+        Log("costume: %s - size %ux%u not usable (4..%d, DXT: multiple of 4)", path, w, h, g_costumeMaxSize); return false;
+    }
+    size_t need = 0; DWORD lw = w, lh = h; DWORD keep = 0;
+    for (DWORD l = 0; l < mips; ++l) {
+        size_t s = blk ? (size_t)((lw + 3) / 4) * ((lh + 3) / 4) * blk : (size_t)lw * lh * 4;
+        if (128 + need + s > b.size()) break;
+        need += s; ++keep; lw = lw > 1 ? lw / 2 : 1; lh = lh > 1 ? lh / 2 : 1;
+    }
+    if (!keep) { Log("costume: %s is cut short", path); return false; }
+    t.w = (int)w; t.h = (int)h; t.mips = (int)keep; t.fmt = fmt; t.data.assign(b.begin() + 128, b.begin() + 128 + need);
+    return true;
+}
+static CostumeTex* CostumeFor(const char* key)
+{
+    if (g_costumeSel <= 0 || g_costumeSel > (int)g_costumeNames.size()) return nullptr;
+    for (auto& e : g_costumeCache) if (e.first == key) return e.second.ok ? &e.second : nullptr;
+    g_costumeCache.push_back({ key, CostumeTex() });
+    CostumeTex& t = g_costumeCache.back().second; t.tried = true;
+    char p[MAX_PATH]; snprintf(p, sizeof(p), "%s\\Costumes\\%s\\%s.dds", g_dir, g_costumeNames[g_costumeSel - 1].c_str(), key);
+    if (GetFileAttributesA(p) == INVALID_FILE_ATTRIBUTES) return nullptr;
+    t.ok = DdsLoad(p, t);
+    if (t.ok) Log("costume: %s <- %s\\%s.dds (%dx%d, %d mip(s), %s)", key, g_costumeNames[g_costumeSel - 1].c_str(), key, t.w, t.h, t.mips,
+                  t.fmt == 21 || t.fmt == 22 ? "32-bit" : t.fmt == MAKEFOURCC('D', 'X', 'T', '1') ? "DXT1" : "DXT5");
+    return t.ok ? &t : nullptr;
+}
+static bool CostumeInstall(int slot, const CostumeTex& t)   // MAIN THREAD only
+{
+    __try {
+        void** dev = *(void***)0x913C48; if (!dev) return false;
+        void* tex = nullptr;
+        typedef HRESULT (__stdcall* CT)(void*, UINT, UINT, UINT, DWORD, DWORD, DWORD, void**);
+        if (((CT)(*(void***)dev)[0x50 / 4])(dev, t.w, t.h, t.mips, 0, t.fmt, 1 /*MANAGED*/, &tex) < 0 || !tex) {
+            Log("costume: CreateTexture %dx%d failed - level texture kept", t.w, t.h); return false;
+        }
+        const BYTE* src = t.data.data(); int lw = t.w, lh = t.h;
+        bool dxt = !(t.fmt == 21 || t.fmt == 22); int blk = t.fmt == MAKEFOURCC('D', 'X', 'T', '1') ? 8 : 16;
+        for (int l = 0; l < t.mips; ++l) {
+            int rows = dxt ? (lh + 3) / 4 : lh, rowb = dxt ? ((lw + 3) / 4) * blk : lw * 4;
+            struct { INT Pitch; void* pBits; } lr = {};
+            typedef HRESULT (__stdcall* LR)(void*, UINT, void*, const RECT*, DWORD);
+            typedef HRESULT (__stdcall* UR)(void*, UINT);
+            if (((LR)(*(void***)tex)[0x40 / 4])(tex, l, &lr, nullptr, 0) >= 0 && lr.pBits) {
+                for (int r = 0; r < rows; ++r) memcpy((BYTE*)lr.pBits + (size_t)r * lr.Pitch, src + (size_t)r * rowb, rowb);
+                ((UR)(*(void***)tex)[0x44 / 4])(tex, l);
+            }
+            src += (size_t)rows * rowb; lw = lw > 1 ? lw / 2 : 1; lh = lh > 1 ? lh / 2 : 1;
+        }
+        BYTE* s = (BYTE*)(0x83C3D0 + slot * 0x2C);
+        void* old = *(void**)(s + 0x1C);
+        *(int*)(s + 0x14) = slot; *(DWORD*)(s + 0x18) = t.fmt; *(void**)(s + 0x1C) = tex;
+        *(float*)(s + 0x20) = 1.0f; *(float*)(s + 0x24) = 1.0f; *(s + 0x28) = 0;
+        for (int st = 0; st < 4; ++st) ((volatile int*)0x6767F8)[st] = -2;
+        if (old) ((ULONG (__stdcall*)(void*))(*(void***)old)[2])(old);
+        return true;
+    } __except (1) { Log("costume: texture upload for slot %d failed", slot); return false; }
+}
+static char __cdecl Hook_UploadSlot(int slot)
+{
+    static DWORD logged = 0;
+    if (g_costumeSel > 0 && slot > 0) {
+        const char* nm = nullptr; __try { nm = *(const char**)(0x83C3D0 + slot * 0x2C); } __except (1) {}
+        char key[32];
+        if (nm && CostumeKey(nm, key)) {
+            if (!logged) { logged = GetCurrentThreadId(); Log("costume: first costume upload on thread %lu (%s)", logged, nm); }
+            CostumeTex* t = CostumeFor(key);
+            if (t && CostumeInstall(slot, *t)) return 1;
+        }
+    }
+    return g_origUpload(slot);
+}
+static int CostumeReuploadAll()   // MAIN THREAD: every slot with a costume name gets the current choice (or the level's)
+{
+    int n = 0;
+    __try {
+        int cnt = *(volatile int*)0x83C3C4, ph = *(volatile int*)0x67668C;
+        BYTE* phEntry = (ph > 0 && ph < cnt) ? *(BYTE**)(0x83C3D0 + ph * 0x2C + 8) : nullptr;
+        for (int i = 1; i < cnt && i < 0x2428; ++i) {             // v1.19: from 1 (the global skulls load early)
+            BYTE* s = (BYTE*)(0x83C3D0 + i * 0x2C); const char* nm = *(const char**)s; char key[32];
+            if (!nm) continue;
+            if (!CostumeKey(nm, key)) {                          // v1.19: skulls switched to "Keep Apply's" -> put the game's back
+                if (!_stricmp(nm, "skull01.tga") || !_stricmp(nm, "skull_orng.tga") || !_stricmp(nm, "meters_skull.tga")) { g_origUpload(i); ++n; }
+                continue;
+            }
+            if (*(BYTE**)(s + 8) == phEntry && !(g_costumeSel > 0 && CostumeFor(key))) continue;   // bank gone: nothing to put back
+            Hook_UploadSlot(i); ++n;
+        }
+    } __except (1) { Log("costume: re-upload stopped by an error"); }
+    return n;
+}
+static void SkullEffectsTick(bool now);   // v1.19
+static void CostumeChanged(bool rescan)   // menu: a new choice / reload files
+{
+    if (rescan) {
+        std::string keep = g_costumeSel > 0 && g_costumeSel <= (int)g_costumeNames.size() ? g_costumeNames[g_costumeSel - 1] : "";
+        if (!keep.empty()) strncpy(g_costumeWanted, keep.c_str(), sizeof(g_costumeWanted) - 1);
+        CostumeScan();
+    } else {
+        if (g_costumeSel > 0 && g_costumeSel <= (int)g_costumeNames.size()) strncpy(g_costumeWanted, g_costumeNames[g_costumeSel - 1].c_str(), sizeof(g_costumeWanted) - 1);
+        else g_costumeWanted[0] = 0;
+    }
+    g_costumeCache.clear();
+    if (!g_costumeHooked) return;
+    int n = CostumeReuploadAll();
+    Log("costume: now %s - %d texture(s) re-uploaded", g_costumeSel ? g_costumeNames[g_costumeSel - 1].c_str() : "level files", n);
+    SkullEffectsTick(true);                                // v1.19
+}
+static void CostumeReloadAction() { CostumeChanged(true); }
+// v1.19: the WORN skull only where the author wants it - the skull over enemies you can interrogate (effect
+// entity_interogate_eff = env_indicator.rxe, spawned at 0x418823) and the special-interrogation hotspots (env_kill_eff /
+// env_kill_eff_smk .rxe; special kills = env_kill_eff02 with skull_orng = its own picture). These are 3D effects from
+// mini.vpp whose texture handles live in the effect record: ring from [0x9101B4] (rec+0 next, rec+0x10 file name,
+// rec+0x28 header: +0x10 count, +0x14 entries of 0x18 bytes, first dword = texture handle once resolved by 0x50FA20).
+// Menus, score, HUD meter, loading pictures keep skull01 = the CLEAN skull. The worn picture gets its own texture slot
+// "skull01_worn.tga" (GetTexIDByName 0x50C750 creates it and uploads it through our 0x519500 hook).
+static int g_wornSlot = -1;
+static int SkullEffectsSwap(int from, int to)
+{
+    int n = 0;
+    __try {
+        BYTE* head = *(BYTE**)0x9101B4; BYTE* rec = head; int guard = 0;
+        while (rec && guard++ < 4000) {
+            const char* nm = (const char*)(rec + 0x10);
+            if (!_strnicmp(nm, "env_indicator", 13) || (!_strnicmp(nm, "env_kill_eff", 12) && _strnicmp(nm, "env_kill_eff02", 14))) {
+                BYTE* hdr = *(BYTE**)(rec + 0x28);
+                if (hdr) {
+                    int cnt = *(int*)(hdr + 0x10); BYTE* e = *(BYTE**)(hdr + 0x14);
+                    for (int i = 0; e && i < cnt && i < 64; ++i) if (*(int*)(e + i * 0x18) == from) { *(int*)(e + i * 0x18) = to; ++n; }
+                }
+            }
+            rec = *(BYTE**)rec;
+            if (rec == head) break;
+        }
+    } __except (1) { Log("costume: skull effects not reachable"); }
+    return n;
+}
+static void SkullEffectsTick(bool now)   // MAIN THREAD
+{
+    static DWORD last = 0; static int applied = 0;   // 0 = clean in the effects, 1 = worn
+    if (!g_costumeHooked || (!now && GetTickCount() - last < 1000)) return;
+    last = GetTickCount();
+    bool want = g_costumeSkulls && g_costumeSel > 0 && CostumeFor("skull01_worn");
+    __try {
+        int clean = ((int (__cdecl*)(const char*, int))0x50C750)("skull01.tga", -1);
+        if (want && g_wornSlot < 0) {
+            g_wornSlot = ((int (__cdecl*)(const char*, int))0x50C750)("skull01_worn.tga", -1);
+            Log("costume: worn skull texture slot %d (clean skull01 = slot %d)", g_wornSlot, clean);
+        }
+        if (g_wornSlot <= 0 || clean <= 0) return;
+        int n = want ? SkullEffectsSwap(clean, g_wornSlot) : SkullEffectsSwap(g_wornSlot, clean);   // also catches re-registered effects
+        if (n || (want ? 1 : 0) != applied) {
+            if (n) Log("costume: %s skull on %d effect picture(s) (enemy / hotspot skulls)", want ? "worn" : "clean", n);
+            applied = want ? 1 : 0;
+        }
+    } __except (1) {}
+}
+static int g_costumeKeyVk = 0;   // [Costume] NextKey = keyboard key that steps to the next costume (live), empty = none
+static void CostumeKeyTick()      // every frame (draw hook): main thread
+{
+    SkullEffectsTick(false);          // v1.19: worn skull on the enemy / hotspot effects (once a second)
+    static bool was = false;
+    if (!g_costumeKeyVk || !g_costumeHooked) return;
+    bool k = false; HWND w = GetForegroundWindow(); DWORD pid = 0;
+    if (w) GetWindowThreadProcessId(w, &pid);
+    if (pid == GetCurrentProcessId()) k = (GetAsyncKeyState(g_costumeKeyVk) & 0x8000) != 0;
+    if (k && !was) {
+        g_costumeSel = CostumeStep(g_costumeSel, +1);            // v1.23: skips look-alikes for the current outfit
+        CostumeChanged(false);
+        Log("costume: key -> %s", g_costumeSel ? g_costumeNames[g_costumeSel - 1].c_str() : "level files");
+    }
+    was = k;
+}
+static void InstallCostumeLoader(const char* ini)
+{
+    GetPrivateProfileStringA("Costume", "Costume", "", g_costumeWanted, sizeof(g_costumeWanted), ini);
+    for (char* c = g_costumeWanted; *c; ++c) if (*c == ';') { *c = 0; break; }
+    { size_t l = strlen(g_costumeWanted); while (l && (g_costumeWanted[l - 1] == ' ' || g_costumeWanted[l - 1] == '\t')) g_costumeWanted[--l] = 0; }
+    g_costumeSkulls = GetPrivateProfileIntA("Costume", "Skulls", 1, ini) ? 1 : 0;   // v1.19
+    g_costumeMaxSize = GetPrivateProfileIntA("Costume", "MaxSize", 4096, ini); if (g_costumeMaxSize < 256) g_costumeMaxSize = 256; if (g_costumeMaxSize > 8192) g_costumeMaxSize = 8192;
+    char tst[96] = ""; GetPrivateProfileStringA("Developer", "CostumeTest", "", tst, sizeof(tst), ini);
+    if (char* gt = strchr(tst, '>')) {
+        *gt = 0; for (char* c = tst; *c; ++c) *c = (char)tolower((unsigned char)*c);
+        strncpy(g_costumeTestFrom, tst, sizeof(g_costumeTestFrom) - 1); strncpy(g_costumeTestTo, gt + 1, sizeof(g_costumeTestTo) - 1);
+        Log("costume: developer test - '%s' counts as %s", g_costumeTestFrom, g_costumeTestTo);
+    }
+    { char kb[32] = ""; GetPrivateProfileStringA("Costume", "NextKey", "", kb, sizeof(kb), ini);
+      for (char* c = kb; *c; ++c) if (*c == ';' || *c == ' ') { *c = 0; break; }
+      Target t = ParseTarget(kb); g_costumeKeyVk = t.kind == T_KEY ? t.value : 0;
+      if (g_costumeKeyVk) Log("costume: key %s steps to the next costume", kb); }
+    CostumeScan();
+    static const BYTE pro[11] = { 0x83, 0xEC, 0x34, 0x53, 0x8B, 0x5C, 0x24, 0x3C, 0x55, 0x56, 0x57 };
+    if (memcmp((void*)0x519500, pro, 11)) { Log("costume: texture upload 0x519500 not as expected (another mod?) - costume loader off"); return; }
+    BYTE* tr = (BYTE*)VirtualAlloc(nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tr) return;
+    memcpy(tr, (void*)0x519500, 8); tr[8] = 0xE9; *(LONG*)(tr + 9) = (LONG)(0x519508 - ((DWORD)tr + 13));
+    FlushInstructionCache(GetCurrentProcess(), tr, 16);
+    g_origUpload = (char (__cdecl*)(int))tr;
+    PatchJmpOrCall(0x519500, 0xE9, (void*)Hook_UploadSlot, 8);
+    g_costumeHooked = true;
+    Log("costume: texture upload hook at 00519500 installed (MaxSize %d)", g_costumeMaxSize);
+}
+
+// v1.22 (Deck screen: T-shirt outfit, coat level -> the cutscene Punisher's coat skirt torn apart). In-level cutscenes
+// use their own "trenchcoat" entity; at cutscene start 0x493C8F the game moves the ONE coat-cloth simulation to it
+// (0x4B1DE0) - but only when the player wears the coat (player +0x30 == trench). With a changed outfit the cloth was
+// never built (the T-shirt player cleared it at spawn), so the cutscene coat had no cloth. Now: changed outfit = the
+// loop runs too, and an unbuilt cloth is BUILT on the cutscene Punisher (0x4B2DC0) instead of re-bound.
+static int __cdecl OutfitChangedNow() { return g_outfitUsed >= 0 && g_outfitUsed != g_outfitLevel; }
+static void __cdecl CoatBindCut(DWORD ent)
+{
+    __try {
+        if (*(volatile int*)0x7C47CC == 0) {
+            ((void (__cdecl*)(DWORD))0x4B2DC0)(ent);
+            static int n = 0; if (n++ < 3) Log("outfit: cutscene coat - cloth built on the cutscene Punisher (%d particles)", *(volatile int*)0x7C47CC);
+        } else ((void (__cdecl*)(DWORD))0x4B1DE0)(ent);
+    } __except (1) { Log("outfit: cutscene coat cloth failed"); }
+}
+static DWORD kCutLoop = 0x493C9F, kCutSkip = 0x493CE7;
+__declspec(naked) static void CutCoatStub()   // at 0x493C97: ecx = player +0x30
+{
+    __asm {
+        cmp  ecx, dword ptr ds:[0x7CF7FC]
+        je   go
+        push ecx
+        push edx
+        call OutfitChangedNow
+        pop  edx
+        pop  ecx
+        test eax, eax
+        jz   skip
+    go:
+        jmp  dword ptr [kCutLoop]
+    skip:
+        jmp  dword ptr [kCutSkip]
+    }
+}
+static void InstallOutfit()
+{
+    InstallOutfitGrip();   // v1.11
+    static const BYTE cc[8] = { 0x3B, 0x0D, 0xFC, 0xF7, 0x7C, 0x00, 0x75, 0x48 };   // v1.22: cutscene coat cloth
+    if (!memcmp((void*)0x493C97, cc, 8)) {
+        PatchJmpOrCall(0x493C97, 0xE9, (void*)CutCoatStub, 8);
+        PatchCall(0x493CD1, (void*)CoatBindCut, 0x4B1DE0);
+        Log("outfit: cutscene coat cloth hook installed");
+    } else Log("outfit: cutscene coat code not as expected - left alone");
+    static const BYTE o1[16] = { 0x8B, 0x04, 0x85, 0xF0, 0xF7, 0x7C, 0x00, 0x8B, 0x0D, 0x04, 0xF8, 0x7C, 0x00, 0x89, 0x41, 0x30 };
+    static const BYTE o2[14] = { 0x8B, 0x15, 0x04, 0xF8, 0x7C, 0x00, 0xA1, 0xFC, 0xF7, 0x7C, 0x00, 0x89, 0x42, 0x30 };
+    if (memcmp((void*)0x495A4A, o1, 16) == 0 && memcmp((void*)0x495A5E, o2, 14) == 0) {
+        PatchJmpOrCall(0x495A4A, 0xE9, (void*)OutfitStub1, 16);
+        PatchJmpOrCall(0x495A5E, 0xE9, (void*)OutfitStub2, 14);
+        Log("outfit: level outfit hook at 00495A4A installed (Outfit=%d, PcSkin=%d)", g_outfit, g_pcSkin);
+    } else Log("outfit: code at 00495A4A not as expected - outfit choice off");
+}
 // world decal record (0xD8): +0x14 created time (float), +0x1C flags (0x40000000 = fading), +0x20 texture,
 // list next +0xD0 / prev +0xD4, head = oldest [0x68AA38]
 static DWORD g_bloodTex[16]; static int g_bloodTexN = 0; static bool g_bloodTexDone = false;
@@ -2770,7 +4366,7 @@ static const BYTE kCamOct2004[36] = { 0x01,0x00,0x00,0x00, 0x9c,0xc4,0x20,0xbe, 
 // random, 3 = Oct 2004 only (the front camera only if the first one is blocked). Menu: Camera & Photo page.
 static int g_gunCam = 1;
 static int g_gunCamApplied = -1;
-static const char* kGunCamNames[4] = { "Retail", "Over the shoulder + front", "Oct 2004 + front", "Oct 2004 only" };
+static const char* kGunCamNames[4] = { "Retail", "Over the shoulder + front", "Beta + front", "Beta only" };   // v1.08: "Oct 2004" -> "Beta" (user)
 static void GunCamApply()      // writes gun camera 1 for the current setting (cheap: only when it changed)
 {
     if (g_gunCam == g_gunCamApplied) return;
@@ -3644,7 +5240,7 @@ static void ResolveImpactSounds()
 // "EK_SEMI_HIT" at the impact -> while the running group ([0x7E2DBC]) is "Harbor Semi Trailer" (its +EffectDeath id at
 // group +0x20 = env_kill_semi), the silent blood_hit_0 burst is attached to the victim's head (NeckBurst; victim =
 // handle at Punisher +0x878 / +0x87C -> 0x4A8D20). [Gore] SemiKickBlood=0 = off.
-static int g_semiKickBlood = 1;
+extern int g_envKillBlood;                                     // v0.86: replaces [Gore] SemiKickBlood
 static void NeckBurst(DWORD corpse);
 static void SemiKickBlood(int sound)
 {
@@ -3673,7 +5269,7 @@ static void SemiKickBlood(int sound)
 static int __cdecl Hook_PlaySound(int sound, void* pos, int a3, int a4, DWORD a5, int a6)
 {
     int r = ((PlaySound_t)0x4613B0)(sound, pos, a3, a4, a5, a6);
-    if (g_semiKickBlood && sound >= 0) SemiKickBlood(sound);   // v0.68
+    if (g_envKillBlood && sound >= 0) SemiKickBlood(sound);    // v0.68 / v0.86
     if (!g_cfg.rumble || !g_pad || sound < 0) return r;
     // your shots: the player's own fire sound (weapon def +0xBC), played as a 2D sound (3rd argument 1)
     // only for the player's shots; enemy shots go through 0x4FF320, which plays its sounds in 3D (0) -
@@ -3959,6 +5555,7 @@ static void __cdecl EnvFxSpawnLog(const DWORD* f)        // f[0] return address,
         (void)hp; (void)v;
     } __except (1) {}
 }
+static void __cdecl HookOnSpawn(const DWORD* f);
 static __declspec(naked) void Hook_SpawnEffect()
 {
     __asm {
@@ -3966,6 +5563,10 @@ static __declspec(naked) void Hook_SpawnEffect()
         lea  eax, [esp + 32]
         push eax
         call EnvFxSpawnLog
+        add  esp, 4
+        lea  eax, [esp + 32]
+        push eax
+        call HookOnSpawn                // v0.84.2: meat hook blood (victim = the spawn's parent handle)
         add  esp, 4
         mov  eax, [esp + 32 + 4]     // effect id
         push eax
@@ -4733,6 +6334,8 @@ static void H04Text(int x, int y, const char* s, int font, float hgt, DWORD sx, 
     }
     DWORD col = *(volatile DWORD*)0x91327C;           // the colour the game chose (orange when the clip is low)
     int a = *(volatile BYTE*)0x7367AB;
+    int ca = (int)((col >> 24) & 0xFF);              // v0.91: the text's OWN alpha (0x91327F) - it fades out on a weapon
+    if (ca < a) a = ca;                               // switch; the dark edge used only the HUD alpha and stayed visible
     ((void (__cdecl*)(int, int, int, int))0x510B60)(30, 30, 32, a);
     for (int d = 0; d < 4; ++d)
         ((TextK_t)0x518800)(x + (d == 0 ? 1 : d == 1 ? -1 : 0), y + (d == 2 ? 1 : d == 3 ? -1 : 0), FBits(k), FBits(k), s, font, sx, sy);
@@ -5044,8 +6647,316 @@ static void InstallFxHalfPixel()
     PatchCall(0x5144FE, (void*)Hook_FxZoom, 0x519B80);   // v0.65: Slaughter zoom overlay (half-pixel + log)
     PatchCallsTo(0x401000, 0x5EB000, 0x5110B0, (void*)Hook_FxRect, "rectangle draw (b&w diag)");   // v0.65 (log only)
 }
+// ---------------------------------------------------------------- v0.89-v0.96: black Colt for the Punisher only
+// Every Colt holder shares ONE model and its texture handles: lod = [[model+0x68]+0x84], count [lod+0xB8], handles
+// lod+0x54+i*4. Held guns are drawn by the weapon-object draw: call 0x51C2D0(model, pos*, orient*, light*, 0) at
+// 0x50476E with EBP = the weapon object (Deck logs v0.92 / v0.94: 0x430810's calls 0x430A41 / 0x430B6F are props or
+// never run). The Punisher's weapon objects sit at player +0x4E4 / +0x4E8 / +0x4EC (attach slots 6 / 5 / 7, 0x5053F0).
+// While HIS gun is drawn, any handle named "3rd-colt.tga" is swapped for "3rd-colt_pun.tga" (mini.vpp always_loaded.ceg
+// via the installer part "blackcolt", or a test level's wep_colt.ceg), then put back right after. Name of a handle =
+// 0x50BFF0(h) (record +0x10, empty slots give 0x10); lookup without creating a stand-in = 0x50BE30(name) (-1 = not
+// loaded). [Weapons] BlackColt=1 (menu: Weapons page).
+static int   g_blackColt = 1;
+static DWORD g_bcEnt = 0, g_bcModel = 0, g_bcLod = 0, g_bcRet3 = 0, g_bcEbp = 0;
+static int   g_bcSwapIdx[8], g_bcSwapN = 0, g_bcOld = -1, g_bcPun = -1, g_bcLogs = 0, g_bcColtSeen = -2;
+static int BcHandleIs(int h, const char* want)
+{
+    const char* n = nullptr;
+    __try { n = ((const char* (__cdecl*)(int))0x50BFF0)(h); } __except (1) { n = nullptr; }
+    if ((DWORD)n < 0x10000) return 0;
+    char a[40]; int i = 0;
+    __try { for (; n[i] && i < 39; ++i) a[i] = (char)tolower((unsigned char)n[i]); } __except (1) { return 0; }
+    a[i] = 0;
+    size_t L = strlen(want);
+    return strncmp(a, want, L) == 0 && (a[L] == 0 || strcmp(a + L, ".tga") == 0);
+}
+static void __cdecl BcPre()
+{
+    g_bcSwapN = 0;
+    if (!g_blackColt || !g_bcModel || !g_bcEnt) return;
+    __try {
+        DWORD lods = *(volatile DWORD*)(g_bcModel + 0x68); if (!lods) return;
+        DWORD lod = *(volatile DWORD*)(lods + 0x84); if (!lod) return;
+        int n = *(volatile int*)(lod + 0xB8); if (n <= 0 || n > 25) return;
+        for (int i = 0; i < n && g_bcSwapN < 8; ++i) {
+            int h = *(volatile int*)(lod + 0x54 + 4 * i);
+            if (h < 0 || !BcHandleIs(h, "3rd-colt")) continue;
+            if (h != g_bcColtSeen) {          // new level (handles change) -> look the black texture up once
+                g_bcColtSeen = h;
+                __try { g_bcPun = ((int (__cdecl*)(const char*))0x50BE30)("3rd-colt_pun.tga"); } __except (1) { g_bcPun = -1; }
+                if (g_bcPun < 0) __try { g_bcPun = ((int (__cdecl*)(const char*))0x50BE30)("3rd-colt_pun"); } __except (1) { g_bcPun = -1; }
+                Log("black Colt: Colt texture handle %d, black one %d%s", h, g_bcPun, g_bcPun < 0 ? " (not installed - normal Colt)" : "");
+            }
+            if (g_bcPun < 0) return;
+            g_bcLod = lod; g_bcOld = h; g_bcSwapIdx[g_bcSwapN++] = i;
+            *(volatile int*)(lod + 0x54 + 4 * i) = g_bcPun;
+        }
+        if (g_bcSwapN && g_bcLogs < 1) { ++g_bcLogs; Log("black Colt: the Punisher's Colt drawn black"); }
+    } __except (1) { g_bcSwapN = 0; }
+}
+static void __cdecl BcPost()
+{
+    __try { for (int k = 0; k < g_bcSwapN; ++k) *(volatile int*)(g_bcLod + 0x54 + 4 * g_bcSwapIdx[k]) = g_bcOld; } __except (1) {}
+    g_bcSwapN = 0;
+}
+static void ColtDiagCheck();
+static DWORD g_cdRet = 0, g_cdModel = 0, g_bcCallRet = 0; static int g_cdOn = 0;
+static void __cdecl BcPreGun()
+{
+    if (g_cdOn) { g_cdRet = g_bcCallRet; g_cdModel = g_bcModel; ColtDiagCheck(); }
+    g_bcEnt = 0;
+    __try {
+        DWORD p = *(volatile DWORD*)0x6B70FC;
+        if (p && g_bcEbp && (g_bcEbp == *(volatile DWORD*)(p + 0x4E4) || g_bcEbp == *(volatile DWORD*)(p + 0x4E8) ||
+                             g_bcEbp == *(volatile DWORD*)(p + 0x4EC))) g_bcEnt = p;
+    } __except (1) { g_bcEnt = 0; }
+    BcPre();
+}
+__declspec(naked) static void Hook_GunDraw()
+{
+    __asm {
+        mov  g_bcEbp, ebp
+        mov  eax, [esp]                   // v1.23 diag: which call site
+        mov  g_bcCallRet, eax
+        mov  eax, [esp + 4]               // arg0 = the gun model
+        mov  g_bcModel, eax
+        pushad
+        call BcPreGun
+        popad
+        pop  eax                          // our caller's return address
+        mov  g_bcRet3, eax
+        push offset gd_back               // the original returns to us
+        mov  eax, 0x51C2D0
+        jmp  eax
+    gd_back:
+        pushad
+        call BcPost
+        popad
+        push g_bcRet3
+        ret
+    }
+}
+// v1.23 DIAG ([Developer] ColtDiag=1): which 0x51C2D0 call site draws a model that has the Colt texture
+static DWORD g_cdSeen[32]; static int g_cdN = 0;
+static void __cdecl ColtDiagCheck()
+{
+    __try {
+        DWORD lods = *(volatile DWORD*)(g_cdModel + 0x68); if (!lods) return;
+        DWORD lod = *(volatile DWORD*)(lods + 0x84); if (!lod) return;
+        int n = *(volatile int*)(lod + 0xB8); if (n <= 0 || n > 25) return;
+        for (int i = 0; i < n; ++i) {
+            int h = *(volatile int*)(lod + 0x54 + 4 * i);
+            if (h < 0) continue;
+            const char* tn = nullptr; __try { tn = ((const char* (__cdecl*)(int))0x50BFF0)(h); } __except (1) { tn = nullptr; }
+            if ((DWORD)tn < 0x10000 || _strnicmp(tn, "3rd-", 4)) continue;   // weapon textures (3rd-colt, 3rd-shotgun ...)
+            static char seenTx[32][40]; static int nTx = 0; bool dup = false;
+            for (int k = 0; k < nTx; ++k) if (!_stricmp(seenTx[k], tn) && g_cdSeen[k] == g_cdRet) dup = true;
+            if (dup) return;
+            if (nTx < 32) { strncpy(seenTx[nTx], tn, 39); g_cdSeen[nTx++] = g_cdRet; }
+            Log("colt diag: weapon texture %s drawn from call site %08X", tn, g_cdRet - 5);
+            return;
+            if (g_cdN < 32) g_cdSeen[g_cdN++] = g_cdRet;
+            Log("colt diag: Colt model drawn from call site %08X (model %08X)", g_cdRet - 5, g_cdModel);
+            return;
+        }
+    } __except (1) {}
+}
+__declspec(naked) static void ColtDiagDraw()
+{
+    __asm {
+        mov  eax, [esp]
+        mov  g_cdRet, eax
+        mov  eax, [esp + 4]
+        mov  g_cdModel, eax
+        pushad
+        call ColtDiagCheck
+        popad
+        mov  eax, 0x51C2D0
+        jmp  eax
+    }
+}
+static void InstallColtDiag()
+{
+    static const DWORD sites[] = { 0x408C61, 0x4157B2, 0x43100A, 0x452DF1, 0x452F78, 0x452FB9, 0x4530CF, 0x45317F,
+                                   0x490378, 0x4AE337, 0x508B9B, 0x50A310, 0x50AC31, 0x53E10B, 0x53E15D };
+    for (DWORD a : sites) PatchCall(a, (void*)ColtDiagDraw, 0x51C2D0);
+    g_cdOn = 1;
+    Log("colt diag: %d draw sites watched", (int)(sizeof(sites) / sizeof(sites[0])));
+}
+// v1.23 (Deck: holstered black Colts still silver): the holstered gun BODIES are drawn by 0x430670 (prop draw, from the
+// slot loop 0x4309A4 over ent +0x8A4[19]) at 0x4307FD - laptop diag: 3rd-qa93 / 3rd-remington870 from there, while
+// 0x4FE585 only draws the add-ons. At the call: ebx = the model; the caller's EBX (the entity) is saved at [esp+0x1C]
+// (+4 inside the hook). Only the player's own holstered Colts get the black paint.
+static DWORD g_bcPropEnt = 0, g_bcRet4 = 0;
+static void __cdecl BcPreProp()
+{
+    g_bcEnt = 0;
+    __try { DWORD p = *(volatile DWORD*)0x6B70FC; if (p && g_bcPropEnt == p) g_bcEnt = p; } __except (1) { g_bcEnt = 0; }
+    static int seen = 0;
+    if (g_bcEnt && !seen) { seen = 1; Log("black Colt: the player's holstered weapons are drawn here (model %08X)", g_bcModel); }
+    BcPre();
+}
+__declspec(naked) static void Hook_PropDraw()
+{
+    __asm {
+        mov  eax, [esp + 0x20]            // the entity (0x430670 saved the caller's EBX)
+        mov  g_bcPropEnt, eax
+        mov  eax, [esp + 4]               // arg0 = the model
+        mov  g_bcModel, eax
+        pushad
+        call BcPreProp
+        popad
+        pop  eax
+        mov  g_bcRet4, eax
+        push offset pd_back
+        mov  eax, 0x51C2D0
+        jmp  eax
+    pd_back:
+        pushad
+        call BcPost
+        popad
+        push g_bcRet4
+        ret
+    }
+}
+// v0.90: the Colt's HUD / pickup picture. Every texture bind goes through 0x519670(handle, stage, w*, h*) (2D:
+// 0x510C80 -> 0x519CA0 -> 0x5183B0 -> 0x519670), so a 6-byte detour at its start (mov eax,[esp+4] / test eax,eax)
+// remaps handles: every bitmap named ws_colt (misc.vpp + a level's own copy; the PC HUD uses it - colt_b / colt_t are
+// never loaded, Deck log v0.94) or colt_b / colt_t (kept in case) -> its "_pun" twin when that is loaded. Map rebuilt
+// every 1.5 s (handles change per level). Only the Punisher's HUD shows these pictures, so a global swap is right.
+static volatile int g_icoN = 0;
+static int g_icoFrom[16], g_icoTo[16];
+// v1.04: the blood our tables.vpp adds to 4 special kills (casket slam, propeller, semi trailer press, BB fridge)
+// follows [Gore] EnvKillBlood too. Groups are rebuilt from env_kills.tbl at every level load (0x4D49F0 at 0x49C94A)
+// into level-pool records (pointer slots 0x7E2DC0, count 0x7E2E14; record +0x00 = the group's ordinal, name lookup
+// 0x4D1450(name) -> ordinal). Damage1 = [group+0xD0]: +0x0C EffectDamage id, +0x10 EffectPos (0 default/feet,
+// 1 head, 2 neck), +0x14 EffectTime id, +0x18 ms. Effect id by name 0x40E440 (0 / -1 = none). Every 1.5 s: a new
+// record -> remember what OUR table put there; then write ours (Extended) or the retail values (Original).
+extern int g_envKillBlood;
+struct EnvFx { const char* group; const char* dmg; int pos; const char* time; DWORD rec; int ours[4]; };
+static EnvFx g_envFx[4] = {
+    { "Mortuary Casket", "blood_area2", 1, nullptr },   // retail: blood_area2 at the head
+    { "Harbor Propeller", nullptr, -1, nullptr },       // retail: EffectTime commented out = none
+    { "Harbor Semi Trailer", nullptr, -1, nullptr },    // retail: EffectDamage commented out = none
+    { "Russian BB Fridge", nullptr, -1, nullptr } };    // retail: EffectDamage commented out = none
+static void EnvFxTick()
+{
+    __try {
+        int cnt = *(volatile int*)0x7E2E14; if (cnt <= 0 || cnt > 32) return;
+        for (auto& e : g_envFx) {
+            int ord = ((int (__cdecl*)(const char*))0x4D1450)(e.group);
+            DWORD g = 0;
+            if (ord >= 0) for (int i = 0; i < cnt; ++i) { DWORD s = *(volatile DWORD*)(0x7E2DC0 + 4 * i); if (s && *(volatile int*)s == ord) { g = s; break; } }
+            if (!g) { e.rec = 0; continue; }
+            BYTE* d = *(BYTE* volatile*)(g + 0xD0); if (!d) continue;
+            if (e.rec != g) {                                    // freshly built from the table = our values
+                e.rec = g;
+                for (int k = 0; k < 4; ++k) e.ours[k] = *(volatile int*)(d + 0x0C + 4 * k);
+                Log("special kills: '%s' table effects %d / pos %d / time %d (%d ms)", e.group, e.ours[0], e.ours[1], e.ours[2], e.ours[3]);
+            }
+            int want[4] = { e.ours[0], e.ours[1], e.ours[2], e.ours[3] };
+            if (!g_envKillBlood) {
+                want[0] = e.dmg ? ((int (__cdecl*)(const char*))0x40E440)(e.dmg) : 0;
+                if (e.pos >= 0) want[1] = e.pos;
+                want[2] = e.time ? ((int (__cdecl*)(const char*))0x40E440)(e.time) : 0;
+            }
+            for (int k = 0; k < 3; ++k) if (*(volatile int*)(d + 0x0C + 4 * k) != want[k]) *(volatile int*)(d + 0x0C + 4 * k) = want[k];
+        }
+    } __except (1) {}
+}
+static void BcIconRefresh()
+{
+    static DWORD last = 0; DWORD now = GetTickCount();
+    if (now - last < 1500) return; last = now;
+    EnvFxTick();                                             // v1.04
+    PcSkinTick();                                            // v1.10
+    if (!g_blackColt) { g_icoN = 0; return; }
+    static const char* base[5] = { "colt_b", "colt_b_ro", "colt_t", "colt_t_ro", "ws_colt" };
+    int to[5]; bool any = false;
+    __try {
+        for (int k = 0; k < 5; ++k) {
+            char nm[40]; snprintf(nm, sizeof(nm), "%s_pun.tga", base[k]);
+            to[k] = ((int (__cdecl*)(const char*))0x50BE30)(nm);
+            if (to[k] < 0) { snprintf(nm, sizeof(nm), "%s_pun", base[k]); to[k] = ((int (__cdecl*)(const char*))0x50BE30)(nm); }
+            if (to[k] >= 0) any = true;
+        }
+        if (!any) { g_icoN = 0; return; }
+        int n = 0, cnt = *(volatile int*)0x83C3C4;
+        if (cnt <= 0 || cnt > 20000) return;
+        int from[16], dst[16];
+        for (int h = 0; h < cnt && n < 16; ++h)
+            for (int k = 0; k < 5; ++k)
+                if (to[k] >= 0 && h != to[k] && BcHandleIs(h, base[k])) { from[n] = h; dst[n] = to[k]; ++n; break; }
+        g_icoN = 0;                                       // the bind hook reads the arrays: switch off while copying
+        for (int i = 0; i < n; ++i) { g_icoFrom[i] = from[i]; g_icoTo[i] = dst[i]; }
+        static int lastN = -1;
+        if (n != lastN) { lastN = n; Log("black Colt: %d HUD picture(s) shown black", n); }
+        g_icoN = n;
+    } __except (1) { g_icoN = 0; }
+}
+__declspec(naked) static void Hook_BindTexture()
+{
+    __asm {
+        mov  eax, [esp + 4]
+        mov  ecx, g_icoN
+        test ecx, ecx
+        jz   bt_done
+    bt_loop:
+        dec  ecx
+        cmp  eax, [g_icoFrom + ecx * 4]
+        je   bt_hit
+        test ecx, ecx
+        jnz  bt_loop
+        jmp  bt_done
+    bt_hit:
+        mov  eax, [g_icoTo + ecx * 4]
+        mov  [esp + 4], eax
+    bt_done:
+        test eax, eax
+        push 0x519676
+        ret
+    }
+}
+static void EnhDraw();
+bool g_frameEndHooked = false;
+volatile bool g_inFrameEnd = false;
+// v1.03: end of frame - 0x510F59 "mov eax,[0x913C48]" right before EndScene (0x510F61) / Present (0x510F77)
+static void __cdecl FrameEndDraw()
+{
+    if (!g_enhOpen) return;
+    g_inFrameEnd = true;
+    static int fails = 0;
+    __try { EnhDraw(); } __except (1) { if (fails++ < 5) Log("enhancements: end-of-frame draw failed (exception)"); }
+    g_inFrameEnd = false;
+}
+__declspec(naked) static void Hook_FrameEnd()
+{
+    __asm {
+        pushad
+        call FrameEndDraw
+        popad
+        mov  eax, dword ptr ds:[0x913C48]
+        push 0x510F5E
+        ret
+    }
+}
 static void InstallWeaponMods()
 {
+    // v1.03: end-of-frame draw (Hook_FrameEnd at 0x510F59) NOT installed - the game's 2D batch is already flushed there
+    // (laptop test Nov 20: nothing drawn). Kept for a later try at the right flush point.
+    PatchCall(0x50476E, (void*)Hook_GunDraw, 0x51C2D0);      // v0.95 black Colt: the held-gun draw
+    // v1.20 (Deck test: holstered black Colts turned silver): holstered weapons are drawn by 0x4FE4E0 (from the prop
+    // loop 0x430B6F, EBP = the weapon object there too) -> the same swap
+    PatchCall(0x4FE585, (void*)Hook_GunDraw, 0x51C2D0);
+    PatchCall(0x4307FD, (void*)Hook_PropDraw, 0x51C2D0);     // v1.23: holstered gun bodies
+    InstallAnimSlotCapture();                                  // v1.34: fat thug hook anim
+    { char di[MAX_PATH]; snprintf(di, sizeof(di), "%s\\ExtendedCut.ini", g_dir);
+      if (GetPrivateProfileIntA("Developer", "ColtDiag", 0, di)) InstallColtDiag(); }   // v1.23 diag
+    {   // v0.90 black Colt HUD picture: detour the texture bind 0x519670 (8B 44 24 04 85 C0)
+        static const BYTE expect[6] = { 0x8B, 0x44, 0x24, 0x04, 0x85, 0xC0 };
+        if (memcmp((void*)0x519670, expect, 6) == 0) { PatchJmpOrCall(0x519670, 0xE9, (void*)Hook_BindTexture, 6); Log("hooked texture bind 0x519670 (black Colt picture)"); }
+        else Log("texture bind 0x519670 not as expected - black Colt picture off");
+    }
     InstallFxHalfPixel();
     InstallHud2004();   // v0.53 (must run before InstallHudScale, like the other HUD PatchCalls here)
     PatchCall(0x5054BD, (void*)Hook_Attach, 0x4FDD50);
@@ -5124,20 +7035,45 @@ static DWORD g_pausedCallers[24]; static int g_pausedCallerN = 0;
 static int  g_tminX = 1 << 30, g_tmaxX = -(1 << 30), g_tminY = 1 << 30, g_tmaxY = -(1 << 30);
 
 extern const char* g_optText;
+static DWORD g_textCaller = 0;   // v1.05
+extern int g_enhLayout;
+static bool PausedInLevel(); static bool PaperLate(); extern int g_enhLayout;   // v1.38
 static void __cdecl OnTextDrawn(DWORD* f)    // f[0] return address, f[1..6] x, y, text, font, sx, sy
 {
+    g_textCaller = f[0];
+    // v1.05: Extended menu (B5) opened from Options inside a level - the game draws its Options panel AFTER our menu, so
+    // the panel's rows become our label: the first row "EXTENDED CUT", the rest empty (diag logs what it sees)
+    if (g_enhOpen && g_enhFromOptions && (g_enhLayout == 1 || PaperLate()) && PausedInLevel() && f[0] == 0x48CE49 && f[3]) {
+        static int diag = 0;
+        if (diag < 8) { ++diag; __try { Log("menu: options row '%s' at %d,%d", (const char*)f[3], (int)f[1], (int)f[2]); } __except (1) {} }
+        static int firstY = 1 << 30; static DWORD seenAt = 0;
+        if (GetTickCount() - seenAt > 200) firstY = 1 << 30;
+        seenAt = GetTickCount();
+        if ((int)f[2] <= firstY) { firstY = (int)f[2]; f[3] = (DWORD)(PaperLate() ? "" : "EXTENDED CUT"); }
+        else f[3] = (DWORD)"";
+    }
     ++g_textCalls;
     // v0.33: the HUD ammo counter is drawn by the call at 0x46C5C2 (returns to 0x46C5C7) with the score font
     // [0x676058]. digital_small.vf2 (7-segment digits 0-9) ships in every build but no exe loads it - the beta HUD's
     // counter font. Loaded once with the game's font loader 0x518DC0 (name, -1, flag) and swapped in here.
     if (f[0] == 0x46C5C7) H04Ammo(f);   // v0.53: 2004 HUD clip + reserve numbers (sets g_skipOnce)
-    if (g_betaDigitalAmmo && f[0] == 0x46C5C7) {
+    // v0.87: the throwable (grenade) counter is the same kind of text: "%02d" with the score font, drawn at 0x46C936
+    // (returns to 0x46C93B) when a throwable is selected - same digital font.
+    if (g_betaDigitalAmmo && (f[0] == 0x46C5C7 || f[0] == 0x46C93B)) {
         static int font = -2;
         if (font == -2) {
             __try { font = ((int (__cdecl*)(const char*, int, int))0x518DC0)("digital_small.vf2", -1, 0); } __except (1) { font = -1; }
             Log("digital ammo: digital_small.vf2 loaded as font %d (score font %d)", font, *(volatile int*)0x676058);
         }
         if (font >= 0) f[4] = (DWORD)font;
+        // v0.88: the 7-segment glyphs are tiny (about 16 px, thin outlines) and read faint in game - draw them a little
+        // bigger ([Beta] DigitalAmmoScale, default 1.15) with the 2004 HUD's thin dark edge, and hide the game's draw.
+        if (font >= 0 && !g_skipOnce && f[3] && g_digitalScale > 0.5f) {
+            int fh = 0; __try { fh = ((int (__cdecl*)(int))0x5185B0)(font); } __except (1) { fh = 0; }
+            if (fh <= 0) fh = 14;
+            H04Text((int)f[1], (int)f[2], (const char*)f[3], font, fh * g_digitalScale, f[5], f[6]);
+            g_skipOnce = 1;
+        }
     }
     {   // v0.31.2 diagnostics: where (and if) the Options entry "Extended Cut" is drawn
         static int n = 0; static int lx = -99999, ly = -99999;
@@ -5331,6 +7267,8 @@ static void InstallBeta(const char* ini)
     if (g_betaDivesOn && !g_betaDivesHave) { g_betaDivesOn = 0; Log("beta: 2004 dives switched on but not installed - left off"); }
     if (g_betaKickOn && !g_betaKickHave)   { g_betaKickOn = 0;  Log("beta: rifle door kick switched on but not installed - left off"); }
     g_betaDigitalAmmo = GetPrivateProfileIntA("Beta", "DigitalAmmo", 0, ini) ? 1 : 0;   // v0.33: live, no restart
+    { char ds[32]; GetPrivateProfileStringA("Beta", "DigitalAmmoScale", "1.15", ds, sizeof(ds), ini);   // v0.88
+      g_digitalScale = (float)atof(ds); if (g_digitalScale > 2.0f) g_digitalScale = 2.0f; if (g_digitalScale < 0.0f) g_digitalScale = 0.0f; }
     g_hud2004 = GetPrivateProfileIntA("Beta", "Hud2004", 0, ini) ? 1 : 0;   // v0.53
     // v0.57: the weapon half has its own switch; an older ini without the key keeps both halves together
     g_hud2004Wep = GetPrivateProfileIntA("Beta", "Hud2004Weapons", g_hud2004, ini) ? 1 : 0;
@@ -5346,6 +7284,9 @@ static void InstallBeta(const char* ini)
     {
         static const char* k[4] = { "AttachScope", "AttachSilencer", "AttachGrenadeLauncher", "AttachExtendedMagazine" };
         for (int i = 0; i < 4; ++i) g_modAllow[i] = GetPrivateProfileIntA("Weapons", k[i], 1, ini) ? 1 : 0;
+        g_blackColt = GetPrivateProfileIntA("Weapons", "BlackColt", 1, ini) ? 1 : 0;   // v0.89
+        g_outfit = GetPrivateProfileIntA("Costume", "Outfit", 0, ini); if (g_outfit < 0 || g_outfit > 2) g_outfit = 0;   // v1.10
+        g_pcSkin = 0;   // v1.17: [Costume] PcSkin no longer read - the PC skins are costume folders (Costumes\PC skin - ...), live in any level
         int old = GetPrivateProfileIntA("Weapons", "M16LauncherIcon", 1, ini);   // v0.36 key, still read as the default
         g_hudM16GL = GetPrivateProfileIntA("Beta", "M16LauncherIcon", old, ini) ? 1 : 0;
         g_betaTargetIcon = GetPrivateProfileIntA("Beta", "TargetHostageIcon", 0, ini) ? 1 : 0;
@@ -5354,15 +7295,16 @@ static void InstallBeta(const char* ini)
         g_devBigHead      = GetPrivateProfileIntA("Developer", "BigHead", 0, ini) ? 1 : 0;
         g_devForceBW      = GetPrivateProfileIntA("Developer", "ForceBlackWhite", 0, ini) ? 1 : 0;
         g_fakeStickTest   = (int)GetPrivateProfileIntA("Developer", "FakeStickTest", 0, ini);   // 1 = start after 8 s, N > 1 = after N s
-        g_bwFilter        = GetPrivateProfileIntA("Display", "BlackWhite", 1, ini) ? 1 : 0;
-        g_bwSlaughter     = GetPrivateProfileIntA("Display", "BlackWhiteSlaughter", 1, ini) ? 1 : 0;
+        g_bwFilter        = (int)GetPrivateProfileIntA("Display", "BlackWhite", 0, ini); if (g_bwFilter < 0 || g_bwFilter > 2) g_bwFilter = 0;
+        g_bwSlaughter     = (int)GetPrivateProfileIntA("Display", "BlackWhiteSlaughter", 1, ini); if (g_bwSlaughter < 0 || g_bwSlaughter > 2) g_bwSlaughter = 1;
         g_shadowDist      = (int)GetPrivateProfileIntA("Display", "ShadowDistance", 12, ini);   // v0.81
 #ifdef EC_RELEASE
         g_achOn           = 0;                                  // release: achievements are not part of this release
 #else
         g_achOn           = GetPrivateProfileIntA("Achievements", "Enabled", 1, ini) ? 1 : 0;
+        g_achTabShow      = GetPrivateProfileIntA("Achievements", "ShowTab", 1, ini) ? 1 : 0;   // v1.46 (temporary switch)
 #endif
-        g_semiKickBlood   = GetPrivateProfileIntA("Gore", "SemiKickBlood", 1, ini) ? 1 : 0;
+        g_envKillBlood    = GetPrivateProfileIntA("Gore", "EnvKillBlood", 1, ini) ? 1 : 0;      // v0.86 (hook kill always on)
         g_interKillScore  = (int)GetPrivateProfileIntA("Gameplay", "InterrogationKillScore", 0, ini); if (g_interKillScore < 0 || g_interKillScore > 3) g_interKillScore = 0;
         g_fxHalfPixel     = GetPrivateProfileIntA("Display", "EffectPixelFix", 1, ini) ? 1 : 0;
         g_slTileFix       = GetPrivateProfileIntA("Display", "SlaughterTileFix", 1, ini) ? 1 : 0;
@@ -5396,7 +7338,11 @@ static void InstallBeta(const char* ini)
           if (g_photoMoveSpeed < 0.2f || g_photoMoveSpeed > 6.0f) g_photoMoveSpeed = 1.2f;
           GetPrivateProfileStringA("Photo", "TurnSpeed", "1.0", pv, sizeof(pv), ini); g_photoTurnSpeed = (float)atof(pv);
           if (g_photoTurnSpeed < 0.2f || g_photoTurnSpeed > 3.0f) g_photoTurnSpeed = 1.0f;
-          g_photoInvertY = (int)GetPrivateProfileIntA("Photo", "InvertY", 0, ini) ? 1 : 0; }
+          g_photoInvertY = (int)GetPrivateProfileIntA("Photo", "InvertY", 0, ini) ? 1 : 0;
+          char pk[32] = "F9"; GetPrivateProfileStringA("Photo", "Key", "F9", pk, sizeof(pk), ini);   // v1.21
+          for (char* c = pk; *c; ++c) if (*c == ';' || *c == ' ') { *c = 0; break; }
+          Target t = ParseTarget(pk); g_photoKeyVk = t.kind == T_KEY ? t.value : 0;
+          Log("photo mode: keyboard key %s", g_photoKeyVk ? pk : "none"); }
         { char sv[32]; GetPrivateProfileStringA("Developer", "Slowmo", "1.0", sv, sizeof(sv), ini);
           g_devSlowmo = (float)atof(sv); if (g_devSlowmo < 1.0f || g_devSlowmo > 4.0f) g_devSlowmo = 1.0f; }
         char v[32];
@@ -5486,18 +7432,37 @@ static void LogPlayerPosition()
         for (int i = 0; i < nb; ++i) {
             // trigger zones that list this spot (glow 0x46AEA0 needs one that is on (+0x258 bit 0) with the player in it)
             int zones = 0, on = 0;
+            DWORD hit[4] = { 0, 0, 0, 0 };                 // v0.83: the linked triggers, for the details line
             DWORD tr = *(volatile DWORD*)(0x7EFA08 + 0x238);
             for (int guard = 0; tr && tr != 0x7EFA08 && guard < 8192; ++guard, tr = *(volatile DWORD*)(tr + 0x238)) {
                 int nl = *(volatile int*)(tr + 0x270); DWORD links = *(volatile DWORD*)(tr + 0x26C);
                 for (int j = 0; j < nl && j < 64 && links; ++j) {
                     if (((volatile DWORD*)links)[j * 2 + 1] != 0) continue;
                     if (((EvFromHandle_t)0x4EF5C0)(((volatile DWORD*)links)[j * 2]) == best[i].ev) {
+                        if (zones < 4) hit[zones] = tr;
                         ++zones; if (*(volatile BYTE*)(tr + 0x258) & 1) ++on; break;
                     }
                 }
             }
             Log("    %.1f m  at %.2f %.2f %.2f  (used %d of %d)  trigger zones %d, on %d", best[i].d, best[i].x, best[i].y,
                 best[i].z, best[i].used, best[i].mx, zones, on);
+            // v0.83: why a spot does not glow. The glow (0x46AEA0) shows the nearest spot within 20 m whose trigger
+            // has flag bit 0 and passes 0x4F8BD0(trigger, player, 1, 0, 0) - no zone test. Log what that check reads.
+            if (i < 3) {
+                DWORD pe = *(volatile DWORD*)0x6B70FC;
+                for (int z = 0; z < zones && z < 4; ++z) {
+                    DWORD q = hit[z]; char ok = -1;
+                    __try { if (pe) ok = ((char (__cdecl*)(DWORD, DWORD, char, char, char))0x4F8BD0)(q, pe, 1, 0, 0); } __except (1) { ok = -2; }
+                    Log("      trigger %08X: check %d | flags %08X type %d | uses %d / %d | +28C %d +290 %d +294 %d +2A0 %08X"
+                        " | ev +AC %d +D4 %d | player +10 %d +268 %d +DC %d",
+                        q, (int)ok, *(volatile DWORD*)(q + 0x258), *(volatile int*)(q + 0x25C),
+                        *(volatile int*)(q + 0x24C), *(volatile int*)(q + 0x250), *(volatile int*)(q + 0x28C),
+                        *(volatile int*)(q + 0x290), *(volatile int*)(q + 0x294), *(volatile DWORD*)(q + 0x2A0),
+                        *(volatile int*)(best[i].ev + 0xAC), (int)*(volatile BYTE*)(best[i].ev + 0xD4),
+                        pe ? *(volatile int*)(pe + 0x10) : -1, pe ? *(volatile int*)(pe + 0x268) : -1,
+                        pe ? *(volatile int*)(pe + 0xDC) : -1);
+                }
+            }
         }
     } __except (1) { Log("  kill spots: could not be read"); }
 }
@@ -5739,9 +7704,11 @@ struct EnhItem {
     int pad = -1;                  // v0.22: the pad button of a binding row (its icon is drawn before the name)
 };
 // v0.56: 5 tabs (+ Cheats & Debug with Developer mode on); sections fold open / closed
-static const char* kEnhPages[] = { "Controls", "Gameplay", "Gore", "HUD & Display", "Restored content", "Achievements", "Cheats & Debug" };
-static const int kEnhPageCount = 7;
-static int g_devMode = 0;                 // [Enhancements] DeveloperMode: shows the Cheats & Debug tab
+// v1.16: + "Costume" (page 5, user: its own tab, before Achievements; last tab in the release where Achievements is hidden)
+// v1.38 (user): Cheats & Debug moved before Costume and shown by default again (Developer mode on by default)
+static const char* kEnhPages[] = { "Controls", "Gameplay", "Gore", "HUD & Display", "Restored content", "Cheats & Debug", "Costume", "Achievements" };
+static const int kEnhPageCount = 8;
+static int g_devMode = 1;                 // [Enhancements] DeveloperMode: shows the Cheats & Debug tab (v1.38: on by default)
 
 // v0.22 in-game rebinding: what a pad button can do = which PC key / mouse input it sends. The names are the
 // game's default PC bindings (as in the ini comments); if you changed a key in the game's own controls menu
@@ -5786,6 +7753,7 @@ static int ActionOf(const Target& t)
 static bool SameTarget(const Target& a, const Target& b) { return a.kind == b.kind && (a.kind == T_NONE || a.value == b.value); }
 static const char* kStyleShow[] = { "Keyboard", "Xbox", "PlayStation", "Steam Deck", "Auto" };
 static void GorePresetOriginal(); static void GorePresetRecommended(); static void GorePresetMaximum();   // v0.52
+static int g_presetShown = 0;   // v1.40: display only (EnhValueText shows PresetActive())
 static const EnhItem kEnh[] = {
     { 0, "Camera", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
     { 0, "Look sensitivity",      EK_FLOAT, &g_cfg.lookScale, 0.10f, 3.0f, 0.01f, 2, "Settings", "LookSensitivity", "Right-stick camera speed (1.00 = your LookSensitivityX / Y)" },
@@ -5836,8 +7804,6 @@ static const EnhItem kEnh[] = {
     { 1, "Sound", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
     { 1, "Show song titles",      EK_TOGGLE, &g_devSongNames, 0, 1, 1, 0, "Developer", "SongNames", "'Current song: ...' message when the music changes (console display_music_name)" },
     { 1, "Slaughter flashback whispers", EK_TOGGLE, &g_whispers, 0, 1, 1, 0, "Beta", "FlashbackWhispers", "Restored: the whispered flashback lines play during Slaughter mode (in the game files, never played by retail). From the next Slaughter mode" },
-    { 1, "Interrogation camera", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
-    { 1, "Gun tension camera",    EK_INT,   &g_gunCam, 0, 3, 1, 0, "Settings", "GunInterrogationCamera", "Retail / your over-the-shoulder + front / Oct 2004 PS2-demo original + front / Oct 2004 only. From the next gun interrogation" },
     { 1, "Photo mode: L3 + R3 in game (X saves the camera to the log)", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
     { 1, "Photo move speed",      EK_FLOAT, &g_photoMoveSpeed, 0.2f, 6.0f, 0.2f, 1, "Photo", "MoveSpeed", "Free camera move speed in metres a second (LB = slow, RB = fast)" },
     { 1, "Photo turn speed",      EK_FLOAT, &g_photoTurnSpeed, 0.2f, 3.0f, 0.1f, 1, "Photo", "TurnSpeed", "Free camera look speed (LB = fine)" },
@@ -5845,9 +7811,17 @@ static const EnhItem kEnh[] = {
     { 1, "Developer", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
     { 1, "Developer mode",        EK_TOGGLE, &g_devMode, 0, 1, 1, 0, "Enhancements", "DeveloperMode", "On = the Cheats & Debug tab (console cheats, position save / load, logging) is shown" },
     { 2, "Presets", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
+#ifdef EC_RELEASE
     { 2, "Preset: Original gore",  EK_ACTION, (void*)GorePresetOriginal, 0, 0, 0, 0, nullptr, nullptr, "Sets every row below to the game's own behaviour" },
     { 2, "Preset: Recommended",    EK_ACTION, (void*)GorePresetRecommended, 0, 0, 0, 0, nullptr, nullptr, "Extended Cut defaults: more blood, head wounds, critical hits 25 %" },
     { 2, "Preset: Maximum gore",   EK_ACTION, (void*)GorePresetMaximum, 0, 0, 0, 0, nullptr, nullptr, "Everything at its bloodiest" },
+#else
+    { 2, "Preset: Original (Retail)", EK_ACTION, (void*)GorePresetOriginal, 0, 0, 0, 0, nullptr, nullptr, "The game as shipped, with all its censorship: black & white interrogation kills, kill penalty, the game's own blood and gore. Sets rows on the Gameplay, HUD & Display, Restored content and Gore tabs; game tables after a restart" },
+    { 2, "Preset: Uncut",          EK_ACTION, (void*)GorePresetRecommended, 0, 0, 0, 0, nullptr, nullptr, "What the Gore Patch and the other Punisher plugins uncensored, before the Extended Cut: no black & white on kills, no kill penalty, exploding heads. Game tables after a restart" },
+    { 2, "Preset: Extended Cut",   EK_ACTION, (void*)GorePresetMaximum, 0, 0, 0, 0, nullptr, nullptr, "Uncut + everything the Extended Cut adds to blood, gore and gameplay - as brutal as it gets. Game tables after a restart" },
+    { 2, "Active preset",          EK_INT, &g_presetShown, 0, 0, 0, 0, nullptr, nullptr, "Which preset all the rows match now. Custom = you changed rows after picking one (that is fine)" },
+    { 2, "Game tables (restart)",  EK_INT, &g_tablesSel, 0, 2, 1, 0, "Gore", "Tables", "Which game tables load at the next start (the presets set this too): Original (Retail), Uncut or Extended Cut. The Retail / Uncut tables are made by the installer from your files" },
+#endif
     { 2, "Heads", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
     { 2, "Exploding heads",       EK_INT, &g_goreHeads, 0, 2, 1, 0, "Gore", "ExplodingHeads", "Gun quick kills. No gib = entry + exit wound. Slaughter kills always gib" },
     { 2, "Gib stumps",            EK_INT, &g_goreStumps, 0, 2, 1, 0, "Gore", "Stumps", "Original = the game's flat cones. Restored = the developers' torn stumps with bone (they ship turned inward). Random = restored + bloodier + slim / cone legs + tucked arms, a different one each gib" },
@@ -5855,6 +7829,7 @@ static const EnhItem kEnh[] = {
     { 2, "Gunfire head gibs",     EK_INT, &g_goreGunHeads, 0, 3, 1, 0, "Gore", "GunfireHeads", "Normal (game: only some guns), Random 50-50, Off, or Critical hits = a head-shot kill with ANY gun can explode the head" },
     { 2, "Critical hit chance %", EK_INT, &g_goreCritPct, 5, 100, 5, 0, "Gore", "CritChance", "With Critical hits: the chance that a head-shot kill explodes the head" },
     { 2, "Blood", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
+    { 2, "Special Interrogations & Kills", EK_TOGGLE, &g_envKillBlood, 0, 1, 1, 0, "Gore", "EnvKillBlood", "One switch for ALL the blood and gore the Extended Cut adds to the special (environmental) interrogations and quick kills. On (Extended) = our changes (so far: meat hook marks, spray, drip and pool; semi trailer kick and press blood; casket, propeller and fridge blood). Off (Original) = the game's own blood. From the next kill" },
     { 2, "Blood on clothes",      EK_TOGGLE, &g_goreClothes, 0, 1, 1, 0, "Gore", "BloodOnClothes", "After a head gib: blood on the chest, a shoulder and the upper back" },
     { 2, "Quick-kill wounds",     EK_TOGGLE, &g_goreKillWounds, 0, 1, 1, 0, "Gore", "KillWounds", "Knife / bash quick kills: 2+ blood marks at the right spots" },
     { 2, "Quick-kill blood layers", EK_INT, &g_decalLayers, 1, 4, 1, 0, "Settings", "DecalLayers", "1 = normal, 2-4 = bloodier (needs the 4 MB decal exe)" },
@@ -5866,8 +7841,8 @@ static const EnhItem kEnh[] = {
     { 3, "HUD on / off button",   EK_INT, &g_devHudKey, 0, 4, 1, 0, "Developer", "HudToggle", "Hold LB + this D-pad direction to hide / show the HUD. Or any keyboard key: ExtendedCut.ini [Developer] HudToggleKey=F8" },
     { 3, "Reticle only when aiming", EK_TOGGLE, &g_devOldReticle, 0, 1, 1, 0, "Developer", "OldReticle", "The reticle shows only while you zoom-aim (console Old_style_reticle - same picture, no other style)" },
     { 3, "Screen", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
-    { 3, "Black & white kill effects", EK_TOGGLE, &g_bwFilter, 0, 1, 1, 0, "Display", "BlackWhite", "On = the game's black & white screen when an environment interrogation kills. Off = in colour. Works right away" },
-    { 3, "Black & white Slaughter mode", EK_TOGGLE, &g_bwSlaughter, 0, 1, 1, 0, "Display", "BlackWhiteSlaughter", "On = Slaughter mode turns the screen black & white (the game's look). Off = in colour. Works right away" },
+    { 3, "Black & white kill effects", EK_INT, &g_bwFilter, 0, 2, 1, 0, "Display", "BlackWhite", "Black & white screen when an environment interrogation kills. On / Off = this setting wins over other mods (ermaccer's PunisherPlugin has its own switch). Game / other mods = let them decide. Works right away" },
+    { 3, "Black & white Slaughter mode", EK_INT, &g_bwSlaughter, 0, 2, 1, 0, "Display", "BlackWhiteSlaughter", "Black & white screen in Slaughter mode. On / Off = this setting wins over other mods. Game / other mods = let them decide. Works right away" },
     { 3, "Shadow distance (m)",   EK_INT, &g_shadowDist, 5, 40, 1, 0, "Display", "ShadowDistance", "How far from the camera Frank and others get a real shadow (further = the faint round one). Game = 5. Raise it for a wide FOV or a far camera. Works right away" },
     { 3, "Level memory MB (restart)", EK_INT, &g_levelPoolMB, 0, 256, 32, 0, "Settings", "LevelPoolMB", "0 = the game's 32.5 MB per level. More = room for smooth blacks / HD textures (a level that does not fit hangs on loading). Default 128. Used the next time the game starts" },
     { 3, "Windowed (restart)",    EK_TOGGLE, &g_windowed, 0, 1, 1, 0, "Display", "Windowed", "Run in a window instead of full screen (the PC demo 1.00 had it). Not for the Steam Deck. Used the next time the game starts" },
@@ -5886,50 +7861,69 @@ static const EnhItem kEnh[] = {
     { 4, "2004 M16 launcher icon", EK_TOGGLE, &g_hudM16GL, 0, 1, 1, 0, "Beta", "M16LauncherIcon", "HUD icon and ammo pickup card show the M16 with the M203 (2004 beta HUD) when the launcher is attached. Needs the HUD icons mini.vpp. Works right away" },
     { 4, "2004 hostage icon (target)", EK_TOGGLE, &g_betaTargetIcon, 0, 1, 1, 0, "Beta", "TargetHostageIcon", "Human-shield HUD icon becomes the 2004 target cutout. Needs the HUD icons mini.vpp. Works right away" },
     { 4, "2004 enemy health bar", EK_TOGGLE, &g_betaLifebar, 0, 1, 1, 0, "Beta", "Lifebar2004", "Enemy health bar in the striped 2004 style, standing upright beside the enemy. Needs the HUD icons mini.vpp. Works right away" },
-    { 5, "Achievements",          EK_TOGGLE, &g_achOn, 0, 1, 1, 0, "Achievements", "Enabled", "On = unlock achievements while you play (pop-up + this page). Your game save is not changed" },
-    { 5, g_achRowLabel[0],        EK_ACTION, (void*)AchRowTotal, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[0] },
-    { 5, g_achRowLabel[1], EK_ACTION, (void*)AchRowAct<0>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[1] },
-    { 5, g_achRowLabel[2], EK_ACTION, (void*)AchRowAct<1>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[2] },
-    { 5, g_achRowLabel[3], EK_ACTION, (void*)AchRowAct<2>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[3] },
-    { 5, g_achRowLabel[4], EK_ACTION, (void*)AchRowAct<3>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[4] },
-    { 5, g_achRowLabel[5], EK_ACTION, (void*)AchRowAct<4>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[5] },
-    { 5, g_achRowLabel[6], EK_ACTION, (void*)AchRowAct<5>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[6] },
-    { 5, g_achRowLabel[7], EK_ACTION, (void*)AchRowAct<6>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[7] },
-    { 5, g_achRowLabel[8], EK_ACTION, (void*)AchRowAct<7>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[8] },
-    { 5, g_achRowLabel[9], EK_ACTION, (void*)AchRowAct<8>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[9] },
-    { 5, g_achRowLabel[10], EK_ACTION, (void*)AchRowAct<9>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[10] },
-    { 5, g_achRowLabel[11], EK_ACTION, (void*)AchRowAct<10>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[11] },
-    { 5, g_achRowLabel[12], EK_ACTION, (void*)AchRowAct<11>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[12] },
-    { 5, g_achRowLabel[13], EK_ACTION, (void*)AchRowAct<12>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[13] },
-    { 5, g_achRowLabel[14], EK_ACTION, (void*)AchRowAct<13>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[14] },
-    { 5, g_achRowLabel[15], EK_ACTION, (void*)AchRowAct<14>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[15] },
-    { 5, g_achRowLabel[16], EK_ACTION, (void*)AchRowAct<15>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[16] },
-    { 5, g_achRowLabel[17], EK_ACTION, (void*)AchRowAct<-1>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[17] },
-    { 6, "Cheats (developer console switches)", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
-    { 6, "Invulnerable",          EK_TOGGLE, &g_devInvuln, 0, 1, 1, 0, "Developer", "Invulnerable", "The Punisher takes no damage (console invulnerable)" },
-    { 6, "Slaughter meter full",  EK_TOGGLE, &g_devSlaughter, 0, 1, 1, 0, "Developer", "SlaughterCheat", "Slaughter Mode meter always full (console slaughter_cheat)" },
-    { 6, "Unlimited env. kills",  EK_TOGGLE, &g_devUnlimitedEnv, 0, 1, 1, 0, "Developer", "UnlimitedEnvActions", "Environment interrogations AND environment quick kills (fryer, stove, fuse box ...) can be used again" },
-    { 6, "No enemy respawn",      EK_TOGGLE, &g_devNoRespawn, 0, 1, 1, 0, "Developer", "NoRespawn", "Enemy spawners stop making new enemies (console no_respawn)" },
-    { 6, "Big head mode",         EK_TOGGLE, &g_devBigHead, 0, 1, 1, 0, "Developer", "BigHead", "Everyone's head x2.5 (console Big_head_mode). Works right away" },
-    { 6, "Slow motion",           EK_FLOAT, &g_devSlowmo, 1.0f, 4.0f, 0.25f, 2, "Developer", "Slowmo", "1.00 = normal speed, bigger = slower (console slowmo). Quick kills reset it" },
-    { 6, "Testing", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
-    { 6, "Save position",         EK_ACTION, (void*)SavePosition, 0, 0, 0, 0, nullptr, nullptr, "Remembers where you stand (kept after a restart). For testing a spot again without walking there" },
-    { 6, "Load position",         EK_ACTION, (void*)LoadPosition, 0, 0, 0, 0, nullptr, nullptr, "Moves you to the saved spot. SAME LEVEL ONLY. Not a checkpoint: killed enemies stay dead (restart the section for fresh ones)" },
-    { 6, "Log my position",       EK_ACTION, (void*)LogPlayerPosition, 0, 0, 0, 0, nullptr, nullptr, "Writes where you stand (x y z, facing) to ExtendedCut.log - for placing new hotspots" },
-    { 6, "Log bones (animation tests)", EK_TOGGLE, &g_devLogBones, 0, 1, 1, 0, "Developer", "LogBones", "Writes every bone of both actors to the log 1-7 s into each interrogation (+ player dumps on L3 + R3). Off for normal play" },
+    { 4, "Gun tension camera",    EK_INT,   &g_gunCam, 0, 3, 1, 0, "Settings", "GunInterrogationCamera", "Retail / over-the-shoulder + front / Beta (the PS2-demo original) + front / Beta only. From the next gun interrogation" },   // v1.08: moved from Gameplay (user)
+    { 6, "Punisher's costume", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
+    { 6, "Outfit",                EK_INT, &g_outfit, 0, 2, 1, 0, "Costume", "Outfit", "Level's own = what each level gives him. Trench coat / T-shirt = that outfit in every level (cutscenes keep the level's own). From the next level or checkpoint load" },
+    { 6, "Costume",               EK_INT, &g_costumeSel, 0, 0, 1, 0, nullptr, nullptr, "Your costumes from the folder scripts > Extended Cut > Costumes (Costume Launcher: Send to in-game picker), incl. the PC Exclusive skins 1980 / 1990 / 2000 (launcher: Send whole library to the game). Level files = what the level files carry (the launcher's Apply). Changes at once, in any level" },
+    { 6, "In-game skulls",        EK_INT, &g_costumeSkulls, 0, 1, 1, 0, "Costume", "Skulls", "Follow costume = the skulls on the HUD, over enemies, at hotspots and in the menus change with the picked costume (when its folder has skulls; Costume Launcher 0.9.26+). Keep Apply's = the skulls the launcher's Apply wrote. Changes at once" },
+    { 6, "Reload costume files",  EK_ACTION, (void*)CostumeReloadAction, 0, 0, 0, 0, nullptr, nullptr, "Reads the Costumes folder again (new or edited costumes) and shows the picked one at once" },
+    { 6, "Weapon Skin", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },   // v1.46 (user): from Gameplay
+    { 6, "Colt .45",              EK_INT, &g_blackColt, 0, 1, 1, 0, "Weapons", "BlackColt", "The Punisher's own Colt .45s (one or two, HUD and pickup picture too); enemies keep the game's Colt. Original = the game's silver Colt. 04 Movie = black with silver details and the gold medallion. Works right away" },
+    { 7, "Achievements",          EK_TOGGLE, &g_achOn, 0, 1, 1, 0, "Achievements", "Enabled", "On = unlock achievements while you play (pop-up + this page). Your game save is not changed" },
+    { 7, g_achRowLabel[0],        EK_ACTION, (void*)AchRowTotal, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[0] },
+    { 7, g_achRowLabel[1], EK_ACTION, (void*)AchRowAct<0>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[1] },
+    { 7, g_achRowLabel[2], EK_ACTION, (void*)AchRowAct<1>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[2] },
+    { 7, g_achRowLabel[3], EK_ACTION, (void*)AchRowAct<2>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[3] },
+    { 7, g_achRowLabel[4], EK_ACTION, (void*)AchRowAct<3>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[4] },
+    { 7, g_achRowLabel[5], EK_ACTION, (void*)AchRowAct<4>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[5] },
+    { 7, g_achRowLabel[6], EK_ACTION, (void*)AchRowAct<5>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[6] },
+    { 7, g_achRowLabel[7], EK_ACTION, (void*)AchRowAct<6>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[7] },
+    { 7, g_achRowLabel[8], EK_ACTION, (void*)AchRowAct<7>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[8] },
+    { 7, g_achRowLabel[9], EK_ACTION, (void*)AchRowAct<8>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[9] },
+    { 7, g_achRowLabel[10], EK_ACTION, (void*)AchRowAct<9>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[10] },
+    { 7, g_achRowLabel[11], EK_ACTION, (void*)AchRowAct<10>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[11] },
+    { 7, g_achRowLabel[12], EK_ACTION, (void*)AchRowAct<11>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[12] },
+    { 7, g_achRowLabel[13], EK_ACTION, (void*)AchRowAct<12>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[13] },
+    { 7, g_achRowLabel[14], EK_ACTION, (void*)AchRowAct<13>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[14] },
+    { 7, g_achRowLabel[15], EK_ACTION, (void*)AchRowAct<14>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[15] },
+    { 7, g_achRowLabel[16], EK_ACTION, (void*)AchRowAct<15>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[16] },
+    { 7, g_achRowLabel[17], EK_ACTION, (void*)AchRowAct<-1>, 0, 0, 0, 0, nullptr, nullptr, g_achRowHelp[17] },
+    { 5, "Cheats (developer console switches)", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
+    { 5, "Invulnerable",          EK_TOGGLE, &g_devInvuln, 0, 1, 1, 0, "Developer", "Invulnerable", "The Punisher takes no damage (console invulnerable)" },
+    { 5, "Slaughter meter full",  EK_TOGGLE, &g_devSlaughter, 0, 1, 1, 0, "Developer", "SlaughterCheat", "Slaughter Mode meter always full (console slaughter_cheat)" },
+    { 5, "Unlimited env. kills",  EK_TOGGLE, &g_devUnlimitedEnv, 0, 1, 1, 0, "Developer", "UnlimitedEnvActions", "Environment interrogations AND environment quick kills (fryer, stove, fuse box ...) can be used again" },
+    { 5, "No enemy respawn",      EK_TOGGLE, &g_devNoRespawn, 0, 1, 1, 0, "Developer", "NoRespawn", "Enemy spawners stop making new enemies (console no_respawn)" },
+    { 5, "Big head mode",         EK_TOGGLE, &g_devBigHead, 0, 1, 1, 0, "Developer", "BigHead", "Everyone's head x2.5 (console Big_head_mode). Works right away" },
+    { 5, "Slow motion",           EK_FLOAT, &g_devSlowmo, 1.0f, 4.0f, 0.25f, 2, "Developer", "Slowmo", "1.00 = normal speed, bigger = slower (console slowmo). Quick kills reset it" },
+    { 5, "Testing", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
+    { 5, "Save position",         EK_ACTION, (void*)SavePosition, 0, 0, 0, 0, nullptr, nullptr, "Remembers where you stand (kept after a restart). For testing a spot again without walking there" },
+    { 5, "Load position",         EK_ACTION, (void*)LoadPosition, 0, 0, 0, 0, nullptr, nullptr, "Moves you to the saved spot. SAME LEVEL ONLY. Not a checkpoint: killed enemies stay dead (restart the section for fresh ones)" },
+    { 5, "Log my position",       EK_ACTION, (void*)LogPlayerPosition, 0, 0, 0, 0, nullptr, nullptr, "Writes where you stand (x y z, facing) to ExtendedCut.log - for placing new hotspots" },
+#ifndef EC_RELEASE
+    { 5, "Achievements tab",      EK_TOGGLE, &g_achTabShow, 0, 1, 1, 0, "Achievements", "ShowTab", "Temporary (test builds): Off hides the Achievements tab. Works right away" },
+#endif
+    { 5, "Log bones (animation tests)", EK_TOGGLE, &g_devLogBones, 0, 1, 1, 0, "Developer", "LogBones", "Writes every bone of both actors to the log 1-7 s into each interrogation (+ player dumps on L3 + R3). Off for normal play" },
 };
 static const int kEnhCount = (int)(sizeof(kEnh) / sizeof(kEnh[0]));
 static int   g_enhPage = 0, g_enhSel = 0;     // v0.56: g_enhSel = position in the VISIBLE rows of the page
 // ---- v0.56: folding sections, visible rows, remembered place, rows that need a missing file
 static bool  g_secOpen[kEnhCount];
 static bool  g_enhStateLoaded = false;
+// v1.38: the tabs shown = a list (Cheats & Debug sits in the middle now). Page 5 Cheats & Debug only with Developer
+// mode; page 7 Achievements not in the public release (they come later) -> there Costume is the last tab.
+static bool  EnhPageShown(int p)
+{
+    if (p < 0 || p >= kEnhPageCount) return false;
+    if (p == 5) return g_devMode != 0;
+    if (p == 7 && !g_achTabShow) return false;   // v1.46
 #ifdef EC_RELEASE
-// public release (build.bat release): achievements come in a later release - their tab (page 5) and the Cheats tab
-// (page 6, developer mode only) come after the last visible page, so the release shows pages 0-4.
-static int   EnhPagesVisible() { return g_devMode ? kEnhPageCount : kEnhPageCount - 2; }
-#else
-static int   EnhPagesVisible() { return g_devMode ? kEnhPageCount : kEnhPageCount - 1; }
+    if (p == 7) return false;
 #endif
+    return true;
+}
+static int   EnhPagesVisible() { int n = 0; for (int p = 0; p < kEnhPageCount; ++p) if (EnhPageShown(p)) ++n; return n; }
+static int   EnhPageAt(int i) { for (int p = 0; p < kEnhPageCount; ++p) if (EnhPageShown(p) && i-- == 0) return p; return 0; }
+static int   EnhPagePos(int page) { int i = 0; for (int p = 0; p < kEnhPageCount; ++p) if (EnhPageShown(p)) { if (p == page) return i; ++i; } return 0; }
 static int   EnhHeaderOf(int i)
 {
     for (int j = i; j >= 0 && kEnh[j].page == kEnh[i].page; --j) if (kEnh[j].kind == EK_HEADER) return j;
@@ -5958,7 +7952,7 @@ static void  EnhStateLoad()
     char buf[128];
     int last = -1;                                  // default: the first section of each tab open, the rest closed
     for (int i = 0; i < kEnhCount; ++i) if (kEnh[i].kind == EK_HEADER) { g_secOpen[i] = kEnh[i].page != last; last = kEnh[i].page; }
-    GetPrivateProfileStringA("Enhancements", "OpenSections", "", buf, sizeof(buf), ini);
+    GetPrivateProfileStringA("Enhancements", "MenuSections2", "", buf, sizeof(buf), ini);   // v1.46: MenuSections2 (headers moved: Weapon Skin); v1.16: new key (the Costume tab moved headers; the old OpenSections order is ignored once)
     if (buf[0]) {                                   // one 0 / 1 per header, in table order
         int k = 0;
         for (int i = 0; i < kEnhCount; ++i) if (kEnh[i].kind == EK_HEADER) {
@@ -5967,7 +7961,7 @@ static void  EnhStateLoad()
         }
     }
     g_enhPage = GetPrivateProfileIntA("Enhancements", "MenuTab", 0, ini);
-    if (g_enhPage < 0 || g_enhPage >= EnhPagesVisible()) g_enhPage = 0;
+    if (!EnhPageShown(g_enhPage)) g_enhPage = 0;
     int item = GetPrivateProfileIntA("Enhancements", "MenuRow", -1, ini);
     g_enhSel = 0;
     if (item >= 0 && item < kEnhCount && kEnh[item].page == g_enhPage) {
@@ -5984,7 +7978,7 @@ static void  EnhStateSave()
     char buf[128]; int k = 0;
     for (int i = 0; i < kEnhCount && k < 120; ++i) if (kEnh[i].kind == EK_HEADER) buf[k++] = g_secOpen[i] ? '1' : '0';
     buf[k] = 0;
-    WritePrivateProfileStringA("Enhancements", "OpenSections", buf, ini);
+    WritePrivateProfileStringA("Enhancements", "MenuSections2", buf, ini);
     char v[16]; snprintf(v, sizeof(v), "%d", g_enhPage);
     WritePrivateProfileStringA("Enhancements", "MenuTab", v, ini);
     static int vis[kEnhCount];
@@ -6023,9 +8017,55 @@ static void GorePreset(int heads, int vary, int gun, int crit, int clothes, int 
     g_enhDirty = true;
     char m[96]; snprintf(m, sizeof(m), "Gore preset: %s", name); EnhStatus(m); Log("menu: %s", m);
 }
-static void GorePresetOriginal()    { g_goreStumps = 0; GorePreset(2, 0, 0, 25, 0, 0, 1, 0, 0, "Original"); }
-static void GorePresetRecommended() { g_goreStumps = 1; GorePreset(1, 1, 3, 25, 1, 1, 2, 1, 3, "Recommended"); }
-static void GorePresetMaximum()     { g_goreStumps = 2; GorePreset(2, 1, 3, 60, 1, 1, 4, 2, 2, "Maximum gore"); }
+// v1.40 (user, Nov 21): three whole-game presets instead of the three gore presets. They set rows on every tab
+// (Gameplay score, HUD & Display black & white, Restored content gun camera, all Gore rows) and the game tables for the
+// next start; every row stays free to change afterwards ("Active preset" then shows Custom).
+//   Original (Retail) = the game as shipped: B&W on interrogation kills, kill penalty, retail gun camera, no plugin gore
+//   Uncut = what the Gore Patch + the other plugins uncensored (ermaccer: no B&W on kills, no negative points;
+//           gore-patched exe: exploding heads), nothing of ours
+//   Extended Cut = Uncut + all of ours, as brutal as it gets
+struct PresetVals { int score, bw, bwSl, gunCam, stumps, envBlood, heads, vary, gun, crit, clothes, kw, layers, world, bullet; };
+static const PresetVals kPresets[3] = {
+    { 1, 1, 1, 0, 0, 0, 0, 0, 0, 25, 0, 0, 1, 0, 0 },     // Original (Retail)
+    { 2, 0, 1, 0, 0, 0, 2, 0, 0, 25, 0, 0, 1, 0, 0 },     // Uncut
+    { 3, 0, 1, 1, 2, 1, 2, 1, 3, 60, 1, 1, 4, 2, 2 },     // Extended Cut
+};
+static int PresetActive()   // 0..2, or -1 = Custom
+{
+    for (int k = 0; k < 3; ++k) {
+        const PresetVals& v = kPresets[k];
+        if (g_interKillScore == v.score && g_bwFilter == v.bw && g_bwSlaughter == v.bwSl && g_gunCam == v.gunCam &&
+            g_goreStumps == v.stumps && g_envKillBlood == v.envBlood && g_goreHeads == v.heads && g_goreVary == v.vary &&
+            g_goreGunHeads == v.gun && (v.gun != 3 || g_goreCritPct == v.crit) && g_goreClothes == v.clothes &&
+            g_goreKillWounds == v.kw && g_decalLayers == v.layers && g_goreWorld == v.world && g_goreBullet == v.bullet &&
+            g_tablesSel == k) return k;
+    }
+    return -1;
+}
+static void PresetApply(int k)
+{
+    const PresetVals& v = kPresets[k];
+    g_interKillScore = v.score; g_bwFilter = v.bw; g_bwSlaughter = v.bwSl; g_gunCam = v.gunCam;
+    g_goreStumps = v.stumps; g_envKillBlood = v.envBlood;
+    GorePreset(v.heads, v.vary, v.gun, v.crit, v.clothes, v.kw, v.layers, v.world, v.bullet, kTablesNames[k]);
+    g_tablesSel = k;
+    char m[160];
+    if (g_tablesLoaded != k)
+        snprintf(m, sizeof(m), "Preset: %s - game tables after a restart%s", kTablesNames[k], TablesFileThere(k) ? "" : " (not installed yet)");
+    else snprintf(m, sizeof(m), "Preset: %s", kTablesNames[k]);
+    EnhStatus(m); Log("menu: %s", m);
+}
+#ifdef EC_RELEASE
+// v1.42 (user: the whole-game presets wait until the Retail / Uncut tables are done and tested): the public release
+// keeps the v0.52 gore presets (Gore rows only) and has no tables switch
+static void GorePresetOriginal()    { g_goreStumps = 0; g_envKillBlood = 0; GorePreset(2, 0, 0, 25, 0, 0, 1, 0, 0, "Original"); }
+static void GorePresetRecommended() { g_goreStumps = 1; g_envKillBlood = 1; GorePreset(1, 1, 3, 25, 1, 1, 2, 1, 3, "Recommended"); }
+static void GorePresetMaximum()     { g_goreStumps = 2; g_envKillBlood = 1; GorePreset(2, 1, 3, 60, 1, 1, 4, 2, 2, "Maximum gore"); }
+#else
+static void GorePresetOriginal()    { PresetApply(0); }
+static void GorePresetRecommended() { PresetApply(1); }
+static void GorePresetMaximum()     { PresetApply(2); }
+#endif
 static int EnhPageItems(int page, int* first)
 {
     int n = 0; *first = -1;
@@ -6064,6 +8104,41 @@ static void EnhValueText(const EnhItem& it, char* out, size_t n)
             static const char* pp[3] = { "Off", "Xbox", "PS2" };
             int x = *(int*)it.ptr; snprintf(out, n, "%s", (x >= 0 && x <= 2) ? pp[x] : "?"); break;
         }
+        if (it.ptr == &g_costumeSel) {   // v1.12
+            int x = *(int*)it.ptr;
+            if (x <= 0 || x > (int)g_costumeNames.size()) snprintf(out, n, "%s", g_costumeNames.empty() ? "Level files (no costumes yet)" : "Level files");
+            else {
+                int same = CostumeSameCount(x);                       // v1.23
+                if (same) snprintf(out, n, "%s (+%d)", g_costumeNames[x - 1].c_str(), same);
+                else snprintf(out, n, "%s", g_costumeNames[x - 1].c_str());
+            }
+            break;
+        }
+        if (it.ptr == &g_costumeSkulls) {   // v1.19
+            snprintf(out, n, "%s", *(int*)it.ptr ? "Follow costume" : "Keep Apply's"); break;
+        }
+        if (it.ptr == &g_outfit) {   // v1.10
+            static const char* w[3] = { "Level's own", "Trench coat", "T-shirt" };
+            int x = *(int*)it.ptr; snprintf(out, n, "%s", (x >= 0 && x <= 2) ? w[x] : "?"); break;
+        }
+        if (it.ptr == &g_pcSkin) {   // v1.10
+            static const char* w[5] = { "Game's choice", "None", "GS", "1990 (EB)", "WM" };
+            int x = *(int*)it.ptr; snprintf(out, n, "%s", (x >= 0 && x <= 4) ? w[x] : "?"); break;
+        }
+        if (it.ptr == &g_bwFilter || it.ptr == &g_bwSlaughter) {   // v1.13
+            static const char* w[3] = { "Off", "On", "Game / other mods" };
+            int x = *(int*)it.ptr; snprintf(out, n, "%s", (x >= 0 && x <= 2) ? w[x] : "?"); break;
+        }
+        if (it.ptr == &g_blackColt) {   // v1.46
+            snprintf(out, n, "%s", *(int*)it.ptr ? "04 Movie" : "Original"); break;
+        }
+        if (it.ptr == &g_presetShown) {   // v1.40
+            int k = PresetActive(); snprintf(out, n, "%s", k < 0 ? "Custom" : kTablesNames[k]); break;
+        }
+        if (it.ptr == &g_tablesSel) {   // v1.40
+            int x = *(int*)it.ptr; if (x < 0 || x > 2) x = 2;
+            snprintf(out, n, "%s%s", kTablesNames[x], !TablesFileThere(x) ? " (not installed)" : x != g_tablesLoaded ? " (after restart)" : ""); break;
+        }
         if (it.ptr == &g_interKillScore) {   // v0.66
             static const char* w[4] = { "Unchanged", "Penalty", "No penalty", "Bonus" };
             int x = *(int*)it.ptr; snprintf(out, n, "%s", (x >= 0 && x <= 3) ? w[x] : "?"); break;
@@ -6092,7 +8167,8 @@ static void EnhValueText(const EnhItem& it, char* out, size_t n)
     case EK_BIND: case EK_BIND_HOSTAGE: {
         int a = ActionOf(*(Target*)it.ptr);
         if (a == 0 && it.kind == EK_BIND_HOSTAGE) snprintf(out, n, "Same as normal");
-        else snprintf(out, n, "%s", a >= 0 ? kActions[a].label : "Other (from the ini)");
+        else if (a >= 0) snprintf(out, n, "%s", kActions[a].label);
+        else { char k[48]; TargetText(*(Target*)it.ptr, k, sizeof(k)); snprintf(out, n, "%s (from the ini)", k); }
     } break;
     default: out[0] = 0;
     }
@@ -6122,6 +8198,21 @@ static void EnhChange(const EnhItem& it, int dir, int mult = 1)   // dir -1 / +1
         if (nv != *v) { *v = nv; g_enhDirty = true; }
     } break;
     case EK_INT: {
+        if (it.ptr == &g_costumeSel) {   // v1.12: wraps round, applies at once
+            g_costumeSel = CostumeStep(g_costumeSel, dir);           // v1.23: look-alikes for the current outfit once
+            CostumeChanged(false); g_enhDirty = true;
+            int tee = 0, coat = 0;
+            char m[128];
+            if (g_costumeSel) { CostumeCount(g_costumeNames[g_costumeSel - 1].c_str(), &tee, &coat); snprintf(m, sizeof(m), "%s: %d T-shirt + %d coat pictures", g_costumeNames[g_costumeSel - 1].c_str(), tee, coat); }
+            else snprintf(m, sizeof(m), "Level files");
+            EnhStatus(m);
+            break;
+        }
+        if (it.ptr == &g_costumeSkulls) {   // v1.19: applies at once
+            g_costumeSkulls = g_costumeSkulls ? 0 : 1; g_enhDirty = true;
+            g_costumeCache.clear(); CostumeChanged(false);
+            break;
+        }
         if (it.ptr == &g_goreBullet) {   // v0.46.3: menu order Normal, Normal + splat, Bigger, Heavy (saved values unchanged)
             static const int order[4] = { 0, 3, 1, 2 };
             int pos = 0; for (int i = 0; i < 4; ++i) if (order[i] == g_goreBullet) pos = i;
@@ -6149,6 +8240,7 @@ static void EnhChange(const EnhItem& it, int dir, int mult = 1)   // dir -1 / +1
             char s[48];                                 // v0.50.1: each action its own message
             if (it.ptr == (void*)SavePosition) snprintf(s, sizeof(s), "Position saved");
             else if (it.ptr == (void*)LoadPosition) snprintf(s, sizeof(s), g_tpHave ? "Moved to the saved position" : "No position saved yet");
+            else if (it.ptr == (void*)CostumeReloadAction) snprintf(s, sizeof(s), "%d costume(s) found", (int)g_costumeNames.size());
             else if (it.ptr == (void*)LogPlayerPosition) snprintf(s, sizeof(s), "Position #%d written to the log", g_posLogCount);
             else s[0] = 0;
             if (s[0]) EnhStatus(s);
@@ -6268,6 +8360,7 @@ static bool EnhSave()
         }
         t.Set(it.section, it.key, v);
     }
+    t.Set("Costume", "Costume", g_costumeWanted);   // v1.12: by name (folders come and go)
     bool ok = t.Save(ini);
     Log("enhancements: settings %s ExtendedCut.ini", ok ? "saved to" : "could NOT be saved to");
     ResolutionSave();   // v0.42
@@ -6364,6 +8457,16 @@ static bool EnhItemFromIni(const EnhItem& it, const char* path)
     }
     return true;
 }
+// v1.00: X resets only the highlighted setting (user Nov 20: the old X reset EVERY setting on every page at once)
+static void EnhResetOne(const EnhItem& it)
+{
+    char def[MAX_PATH]; DefaultsPath(def);
+    if (GetFileAttributesA(def) == INVALID_FILE_ATTRIBUTES) { EnhStatus("No ExtendedCut_defaults.ini found"); return; }
+    if (!EnhItemFromIni(it, def)) { EnhStatus("This setting has no default"); return; }
+    g_enhDirty = true;
+    char m[128]; snprintf(m, sizeof(m), "%s back to its default", it.label ? it.label : "Setting"); EnhStatus(m);
+    Log("enhancements: '%s' reset from ExtendedCut_defaults.ini", it.label ? it.label : "?");
+}
 static void EnhResetDefaults()
 {
     char def[MAX_PATH]; DefaultsPath(def);
@@ -6386,14 +8489,45 @@ static bool PlainPause()
     if (g_pauseEveryFrame) return GetTickCount() - g_lastPauseDraw < 250;   // the pause screen is being drawn
     return true;
 }
+// v1.13: while the Extended menu is open the game gets no keyboard key presses (its window procedure feeds them to
+// its own menus, e.g. Esc left the pause screen under our menu). Esc / Backspace on the keyboard close our menu.
+// Key releases still pass (no stuck keys). Alt combos (WM_SYSKEYDOWN) are not touched.
+static WNDPROC g_ecPrevWndProc = nullptr;
+static HWND    g_ecWnd = nullptr;
+static volatile bool g_kbClose = false;
+static LRESULT CALLBACK EcWndProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    if (g_photo && !g_enhOpen && !PhotoHeld() && (m == WM_KEYDOWN || m == WM_CHAR) && w != VK_ESCAPE && w != 27
+        && w != VK_PAUSE && !(g_cfg.map[P_START].kind == T_KEY && (int)w == g_cfg.map[P_START].value)   // v1.22: Pause and
+        && !(g_cfg.map[P_BACK].kind == T_KEY && (int)w == g_cfg.map[P_BACK].value))                     // the Start / Back keys pause
+        return 0;                                        // v1.21: photo mode keys do not move / shoot the Punisher
+    if (g_enhOpen && (m == WM_KEYDOWN || m == WM_CHAR)) {
+        if (m == WM_KEYDOWN && !(l & (1 << 30)) && (w == VK_ESCAPE || w == VK_BACK)) g_kbClose = true;
+        return 0;
+    }
+    return CallWindowProcA(g_ecPrevWndProc, h, m, w, l);
+}
+static void EcHookWindow()
+{
+    HWND w = GetActiveWindow(); if (!w) w = GetForegroundWindow();
+    if (!w || w == g_ecWnd) return;
+    DWORD pid = 0; GetWindowThreadProcessId(w, &pid);
+    if (pid != GetCurrentProcessId()) return;
+    WNDPROC prev = (WNDPROC)SetWindowLongPtrA(w, GWLP_WNDPROC, (LONG_PTR)EcWndProc);
+    if (!prev) { Log("menu: keyboard filter not installed (%lu)", GetLastError()); return; }
+    g_ecPrevWndProc = prev; g_ecWnd = w;
+    Log("menu: keyboard filter on the game window (keys do not reach the game while the Extended menu is open)");
+}
 static void EnhIgnoreHeld() { for (int i = 0; i < P_COUNT; ++i) if (g_raw[i]) g_padIgnore[i] = true; }
 static void EnhOpen()
 {
+    EcHookWindow();                                 // v1.13
+    g_kbClose = false;
     g_enhOpen = true;
     EnhIgnoreHeld();
     memset(g_down, 0, sizeof(g_down)); g_rx = g_ry = g_rxLin = g_ryLin = 0;
     if (!g_enhStateLoaded) EnhStateLoad();          // v0.56: back where you were
-    if (g_enhPage >= EnhPagesVisible()) { g_enhPage = 0; g_enhSel = 0; }
+    if (!EnhPageShown(g_enhPage)) { g_enhPage = 0; g_enhSel = 0; }
     { static int vis[kEnhCount]; int n = EnhVisible(g_enhPage, vis); if (g_enhSel >= n) g_enhSel = 0; }
     g_enhStatus[0] = 0;
     RECT rc = {}; HWND w = GetActiveWindow(); if (w) GetClientRect(w, &rc);
@@ -6451,8 +8585,10 @@ static void MenuSound(DWORD global)
 }
 static void EnhUpdate()
 {
-    if (g_devMenuPreview != -99) {                        // v0.72 dev: show the Achievements tab while paused, no pad
-        if (PausedInLevel()) { int v = g_devMenuPreview; g_enhFromOptions = v >= 100; if (v >= 100) v -= 200; g_enhOpen = true; g_enhPage = 5; g_achDetail = v == -3 ? -2 : v; g_enhSel = 2; }
+    if (g_devMenuPreview != -99 && g_devMenuPreview != -98) {   // v0.72 dev: show the Achievements tab while paused, no pad
+        if (PausedInLevel()) { EcHookWindow(); if (!g_enhStateLoaded) EnhStateLoad(); }   // v1.13 / v1.16 (dev preview: keyboard filter, open sections)
+        if (PausedInLevel() && g_devMenuPreview >= 300) { g_enhFromOptions = false; g_enhOpen = true; g_enhPage = (g_devMenuPreview - 300) % 10; g_achDetail = -2; g_enhSel = g_devMenuPreview >= 310 ? 6 : 3; }   // v1.03 dev: 300+page = that page
+        else if (PausedInLevel()) { int v = g_devMenuPreview; g_enhFromOptions = v >= 100; if (v >= 100) v -= 200; g_enhOpen = true; g_enhPage = 7; g_achDetail = v == -3 ? -2 : v; g_enhSel = 2; }
         return;
     }
     static bool prev[P_COUNT];
@@ -6466,7 +8602,7 @@ static void EnhUpdate()
         if (plain && g_enhOpenBtn >= 0 && edge[g_enhOpenBtn]) EnhOpen();
         return;
     }
-    if (!g_pad)           { EnhClose("controller gone"); return; }
+    if (!g_pad && g_devMenuPreview != -98) { EnhClose("controller gone"); return; }   // v1.03 dev: MenuPreview=-98 keeps it open without a pad (laptop screenshots)
     if (!PausedInLevel() && !g_enhFromOptions) { EnhClose("game unpaused"); return; }
     static int vis[kEnhCount];
     int n = EnhVisible(g_enhPage, vis);
@@ -6475,7 +8611,7 @@ static void EnhUpdate()
         return;
     }
     if (g_achDetail != -2) {                             // v0.72: achievements level page
-        if (g_enhPage != 5 || edge[P_LB] || edge[P_RB] || edge[g_enhOpenBtn] || edge[P_START]) g_achDetail = -2;
+        if (g_enhPage != 7 || edge[P_LB] || edge[P_RB] || edge[g_enhOpenBtn] || edge[P_START]) g_achDetail = -2;
         else {
             if (edge[P_EAST] || edge[P_SOUTH]) { g_achDetail = -2; MenuSound(0x73D6BC); return; }
             int ids[40]; int an = AchOfLevel(g_achDetail, ids, 40); int& k = g_achPick[AchRowOf(g_achDetail)];
@@ -6491,11 +8627,12 @@ static void EnhUpdate()
             return;
         }
     }
+    if (g_kbClose) { g_kbClose = false; MenuSound(0x73D6BC); EnhClose("keyboard"); return; }   // v1.13
     if (edge[P_EAST] || edge[g_enhOpenBtn] || edge[P_START]) { MenuSound(0x73D6BC); EnhClose("button"); return; }
     int pc = EnhPagesVisible();
-    if (g_enhPage >= pc) { g_enhPage = 0; g_enhSel = 0; n = EnhVisible(g_enhPage, vis); }
+    if (!EnhPageShown(g_enhPage)) { g_enhPage = 0; g_enhSel = 0; n = EnhVisible(g_enhPage, vis); }
     if (edge[P_LB] || edge[P_RB]) {
-        g_enhPage = (g_enhPage + (edge[P_RB] ? 1 : pc - 1)) % pc;
+        g_enhPage = EnhPageAt((EnhPagePos(g_enhPage) + (edge[P_RB] ? 1 : pc - 1)) % pc);   // v1.38: through the shown tabs
         MenuSound(edge[P_RB] ? 0x73D6A0 : 0x73D69C);
         g_enhSel = 0; g_enhStatus[0] = 0;
         n = EnhVisible(g_enhPage, vis);
@@ -6516,7 +8653,7 @@ static void EnhUpdate()
         if (g_dirPulse[3]) want = true;
         if (g_dirPulse[2]) want = false;
         if (want != g_secOpen[h]) { g_secOpen[h] = want; MenuSound(0x73D6C0); }
-        if (edge[P_WEST]) { EnhResetDefaults(); MenuSound(0x73D6C0); }
+        if (edge[P_WEST]) EnhStatus("Highlight a setting to reset it");   // v1.00: no reset-all on a heading
         return;
     }
     const EnhItem& it = kEnh[vis[g_enhSel]];
@@ -6534,7 +8671,7 @@ static void EnhUpdate()
     if (g_dirPulse[2] && it.kind != EK_ACTION) { EnhChange(it, -1, mult); MenuSound(0x73D6AC); }
     if (g_dirPulse[3] && it.kind != EK_ACTION) { EnhChange(it, +1, mult); MenuSound(0x73D6B0); }
     if (edge[P_SOUTH]) { EnhChange(it, +1); MenuSound(0x73D6C0); }
-    if (edge[P_WEST]) { EnhResetDefaults(); MenuSound(0x73D6C0); }
+    if (edge[P_WEST] && it.kind != EK_ACTION) { EnhResetOne(it); MenuSound(0x73D6C0); }   // v1.00: this setting only
 }
 
 // ---- drawing
@@ -6640,9 +8777,47 @@ static void PaperBar(int textX, int textY, int fh, int textW)
     if (m >= 0 && mw > 0 && textW > 0) PaperStretch(m, textX, y, textW, mh, 0, 0, mw, mh);
     if (e >= 0) PaperSprite(e, textX + textW, textY + (fh - eh) / 2);
 }
-// v0.32.1: in the pause menu, the main menu's full-screen notebook (options_bg.tga) below the title bar
-static void PaperNotebook(int W, int H)
+// v1.38: the notebook copied into mini.vpp always_loaded.ceg by the menuart part (ec_menu_paper.tga = the player's
+// misc.vpp int-mainmenu options_bg.tga) - a level does not load the main menu's own copy. Looked up every frame
+// (like B5Ready: no slot is created for a missing name).
+static int PaperArt(int* w, int* h)
 {
+    int t = -1; *w = *h = 0;
+    __try { t = ((int (__cdecl*)(const char*))0x50BE30)("ec_menu_paper.tga"); } __except (1) { t = -1; }
+    if (t >= 0) __try { ((void (__cdecl*)(int, int*, int*))0x50BEB0)(t, w, h); } __except (1) { t = -1; }
+    if (t < 0 || *w < 128 || *h < 128) t = -1;
+    static int logged = -2;
+    if (logged != (t >= 0)) { logged = t >= 0; Log("menu: paper %s", t >= 0 ? "found (ec_menu_paper.tga)" : "not installed in mini.vpp - the in-level menu uses the text look"); }
+    return t;
+}
+// v1.38 / v1.39 (user: the game's in-game menu -> Options -> Extended Menu = the paper like the main menu; pause + Y =
+// the dark B5 menu): opened from Options in a level (any Layout), or pause + Y with Layout 0, and the paper installed
+// = the paper menu, drawn at the end of the frame like B5 (over the HUD and the game's pause text)
+static bool PaperLate()
+{
+    if (!g_enhOpen || g_showLayout || !PausedInLevel() || !(g_enhFromOptions || g_enhLayout == 0)) return false;
+    int w, h; return PaperArt(&w, &h) >= 0;
+}
+// v0.32.1: in the pause menu, the main menu's full-screen notebook (options_bg.tga) below the title bar
+static void PaperNotebook(int W, int H, bool ownBar = false)
+{
+    {   // v1.38
+        int aw, ah, a = PaperArt(&aw, &ah);
+        if (a >= 0) {
+            int top = H * 66 / 800;
+            PaperColor(255, 255, 255, 255);
+            PaperStretch(a, 0, top, W, H - top - 6, 0, ah * (top + 6) / H, aw, ah);
+            if (ownBar) {                                // pause + Y: no game title bar - the same dark bar, our title
+                PaperColor(26, 26, 26, 255);
+                PaperStretch(a, 0, 0, W, top, 0, ah / 2, aw, ah / 2 + 1);
+                EnhText(W * 60 / 1280, H * 22 / 800, "EXTENDED MENU", 0xFFFFFF);
+            } else {
+                PaperColor(44, 44, 44, 255);
+                PaperStretch(a, 0, 0, W, 4, 0, ah / 2, aw, ah / 2 + 1);
+            }
+            return;
+        }
+    }
     static int tex = -2, tw = 0, th = 0;
     if (tex == -2) {
         tex = ((int (__cdecl*)(const char*, int))0x50C750)("options_bg.tga", -1);
@@ -6650,8 +8825,8 @@ static void PaperNotebook(int W, int H)
         Log("options: notebook texture %d (%dx%d)", tex, tw, th);
     }
     if (tex < 0 || tw <= 0 || th <= 0) return;
-    // v0.83 (GitHub #1 log: "notebook texture 1858 (32x32)"): in a level options_bg.tga is NOT loaded - the lookup
-    // gives the game's 32x32 stand-in, which was stretched full screen under the menu. Skip it.
+    // v1.02 (GitHub #1 log: "notebook texture 1858 (32x32)"): in a level options_bg.tga is NOT loaded - the lookup
+    // gives the game's 32x32 stand-in, stretched full screen under the menu. Skip it (the B5 layout is used there now).
     if (tw < 128 || th < 128) return;
     int top = H * 66 / 800;                          // the game's title bar stays visible above it
     PaperColor(255, 255, 255, 255);
@@ -6732,7 +8907,7 @@ static void EnhDrawPaper(int W, int H, int fh)
     int cw = (int)(fh * g_enhCharW + 0.5f); if (cw < 4) cw = 4;
     int lh = H * 20 / 800; if (lh < fh + 2) lh = fh + 2;
     int x0 = W * 60 / 1280, y = H * 104 / 800;
-    if (PausedInLevel()) PaperNotebook(W, H);   // v0.32.1: same notebook as the main menu
+    if (PausedInLevel()) PaperNotebook(W, H, !g_enhFromOptions);   // v0.32.1: same notebook as the main menu (v1.38: own bar for pause + Y)
     // top right, where the game shows its own "A Select / B Back"
     int xr = W - W * 122 / 1280, yr = H * 30 / 800;
     const DWORD kHint = 0xC8EBC8;   // v0.32.5: the game's pale green hint colour, one space after the icon
@@ -6742,24 +8917,24 @@ static void EnhDrawPaper(int W, int H, int fh)
     int x = x0;
     int tabsW = 0;   // v0.52: 8 pages - if all tabs do not fit, show previous / current / next + "page n/8"
     const int pcV = EnhPagesVisible();
-    for (int p = 0; p < pcV; ++p) tabsW += PaperTextW(kEnhPages[p]) + cw * 3;
+    for (int i = 0; i < pcV; ++i) tabsW += PaperTextW(kEnhPages[EnhPageAt(i)]) + cw * 3;
     if (x0 + tabsW < W - x0) {
-        for (int p = 0; p < pcV; ++p) {
+        for (int i = 0; i < pcV; ++i) { int p = EnhPageAt(i);
             if (p == g_enhPage) PaperBar(x, y, fh, PaperTextW(kEnhPages[p]));
             EnhText(x, y, kEnhPages[p], p == g_enhPage ? kOnBar : kFaint);
             x += PaperTextW(kEnhPages[p]) + cw * 3;
         }
     } else {
-        int pv = (g_enhPage + pcV - 1) % pcV, nx = (g_enhPage + 1) % pcV;
+        int cp = EnhPagePos(g_enhPage), pv = EnhPageAt((cp + pcV - 1) % pcV), nx = EnhPageAt((cp + 1) % pcV);
         char t[64];
         snprintf(t, sizeof(t), "< %s", kEnhPages[pv]); EnhText(x, y, t, kFaint); x += PaperTextW(t) + cw * 3;
         PaperBar(x, y, fh, PaperTextW(kEnhPages[g_enhPage])); EnhText(x, y, kEnhPages[g_enhPage], kOnBar);
         x += PaperTextW(kEnhPages[g_enhPage]) + cw * 3;
         snprintf(t, sizeof(t), "%s >", kEnhPages[nx]); EnhText(x, y, t, kFaint); x += PaperTextW(t) + cw * 3;
-        snprintf(t, sizeof(t), "(page %d/%d)", g_enhPage + 1, pcV); EnhText(x, y, t, kFaint);
+        snprintf(t, sizeof(t), "(page %d/%d)", cp + 1, pcV); EnhText(x, y, t, kFaint);
     }
     y += lh * 2;
-    if (g_achDetail != -2 && g_enhPage == 5) { AchDrawLevelPage(x0, y, W, H, fh, lh, cw, kInk, kSoft, kFaint); return; }   // v0.72
+    if (g_achDetail != -2 && g_enhPage == 7) { AchDrawLevelPage(x0, y, W, H, fh, lh, cw, kInk, kSoft, kFaint); return; }   // v0.72
     static int vis[kEnhCount];
     int n = EnhVisible(g_enhPage, vis);
     // label and value columns sized from this page
@@ -6800,7 +8975,7 @@ static void EnhDrawPaper(int W, int H, int fh)
         if (sel) PaperBar(xl, y, fh, PaperTextW(line));
         EnhText(xl, y, line, sel ? PaperPulse() : need ? kFaint : kInk);
         if (it.kind == EK_ACTION) {
-            if (g_enhPage == 5 && it.label == g_achRowLabel[0]) {}       // v0.70: total row - nothing to "do"
+            if (g_enhPage == 7 && it.label == g_achRowLabel[0]) {}       // v0.70: total row - nothing to "do"
             else if (sel && AchRowLevel(it.label) != -2) { snprintf(line, sizeof(line), "%s  Open", EnhBtn(P_SOUTH)); EnhText(xv, y, line, kInk); }
             else if (sel) { snprintf(line, sizeof(line), "%s  Do it", EnhBtn(P_SOUTH)); EnhText(xv, y, line, kInk); }
         } else {
@@ -6824,7 +8999,7 @@ static void EnhDrawPaper(int W, int H, int fh)
         if (const char* nd = (it.kind == EK_HEADER) ? nullptr : EnhNeeds(it)) help = nd;
         if (it.kind == EK_BIND || it.kind == EK_BIND_HOSTAGE) {
             int a = ActionOf(*(Target*)it.ptr);
-            if (a < 0)                                     snprintf(hb, sizeof(hb), "Set in ExtendedCut.ini - left/right picks an action instead");
+            if (a < 0)                                     BindIniHelp(*(Target*)it.ptr, hb, (int)sizeof(hb));
             else if (a == 0 && it.kind == EK_BIND_HOSTAGE) snprintf(hb, sizeof(hb), "While holding a shield this button does its normal action");
             else if (a == 0)                               snprintf(hb, sizeof(hb), "This button does nothing");
             else snprintf(hb, sizeof(hb), "Sends %s%s", kActions[a].keyName,
@@ -6834,7 +9009,7 @@ static void EnhDrawPaper(int W, int H, int fh)
         if (help) y += (EnhHelpWrapped(x0, y, W - 2 * x0, lh, help, kInk) - 1) * lh;
     }
     y += lh * 2;
-    snprintf(line, sizeof(line), "%s %s  Tab      %s %s  Section      %s  Defaults", EnhBtn(P_LB), EnhBtn(P_RB), EnhBtn(P_LT), EnhBtn(P_RT), EnhBtn(P_WEST));
+    snprintf(line, sizeof(line), "%s %s  Tab      %s %s  Section      %s  Default", EnhBtn(P_LB), EnhBtn(P_RB), EnhBtn(P_LT), EnhBtn(P_RT), EnhBtn(P_WEST));
     EnhText(x0, y, line, kInk);
     if (g_enhStatus[0] && GetTickCount() - g_enhStatusAt < 3000) EnhText(x0, y + lh, g_enhStatus, kInk);
 }
@@ -6874,8 +9049,218 @@ static void EnhLayout(int W, int H, int fh, bool backHint = true)
     char line[80]; snprintf(line, sizeof(line), "%s Back", EnhBtn(P_EAST));
     EnhText(W - W * 122 / 1280, H * 30 / 800, line, 0xC8EBC8);
 }
+// ---------------------------------------------------------------- v1.01: Extended menu layout "B5" (user's pick, Nov 20)
+// Dark sidebar with the pages + the game's faded skull, torn edge, settings over the dimmed paused game, the game's
+// white brush bar on the selected row, help in its own box, button line right of the sidebar. Art from the player's
+// own files, added to mini.vpp always_loaded.ceg by the installer part "menuart" (ec_menuart.py): ec_menu_skull /
+// _edge / _splat / _bar. Missing -> the old text layout. Designed at 1280 x 800, scaled to the window.
+int g_enhLayout = 1;                     // [Enhancements] Layout: 1 = B5 for pause + Y, 0 = the paper / text layout there too
+struct B5Tex { const char* name; int tex, w, h; };
+static B5Tex g_b5[4] = { { "ec_menu_skull.tga", -2 }, { "ec_menu_edge.tga", -2 }, { "ec_menu_splat.tga", -2 }, { "ec_menu_bar.tga", -2 } };
+static bool B5Ready()
+{
+    bool ok = true;
+    for (auto& t : g_b5) {
+        __try { t.tex = ((int (__cdecl*)(const char*))0x50BE30)(t.name); } __except (1) { t.tex = -1; }
+        t.w = t.h = 0;
+        if (t.tex >= 0) __try { ((void (__cdecl*)(int, int*, int*))0x50BEB0)(t.tex, &t.w, &t.h); } __except (1) { t.tex = -1; }
+        if (t.tex < 0 || t.w <= 0) ok = false;
+    }
+    static int logged = -1;
+    if (logged != (int)ok) { logged = ok; Log("menu: B5 layout %s", ok ? "art found" : "art not installed (mini.vpp) - old layout"); }
+    return ok;
+}
+static float g_b5k = 1.0f, g_b5ky = 1.0f;
+static int B5X(int x) { return (int)(x * g_b5k + 0.5f); }
+static int B5Y(int y) { return (int)(y * g_b5ky + 0.5f); }
+static void B5Fill(int x, int y, int w, int h, int r, int g, int b, int a)      // solid: the middle of the white bar
+{
+    const B5Tex& t = g_b5[3];
+    PaperColor(r, g, b, a);
+    PaperStretch(t.tex, B5X(x), B5Y(y), B5X(w), B5Y(h), t.w * 3 / 8, t.h / 4, t.w * 5 / 8, t.h * 3 / 4);
+}
+static void B5Pic(int i, int x, int y, int w, int h, int r, int g, int b, int a)
+{
+    const B5Tex& t = g_b5[i];
+    PaperColor(r, g, b, a);
+    PaperStretch(t.tex, B5X(x), B5Y(y), B5X(w), B5Y(h), 0, 0, t.w, t.h);
+}
+static int B5TextW(const char* s, int font, float k)
+{
+    int w = 0, h = 0;
+    __try { ((void (__cdecl*)(int*, int*, const char*, int, int))0x5185E0)(&w, &h, s, -1, font); } __except (1) { w = 0; }
+    return (int)(w * k);
+}
+// text at design coordinates, k = size in "design pixels" per font pixel
+static void B5Text(int x, int y, const char* s, DWORD rgb, float k, int font)
+{
+    *(volatile DWORD*)0x91327C = (rgb & 0x00FFFFFF) | 0xFF000000;
+    float kk = k * g_b5ky;
+    ((TextK_t)0x518800)(B5X(x), B5Y(y), FBits(kk), FBits(kk), s, font, g_drawSx, g_drawSy);
+}
+static void B5Upper(char* d, const char* s, size_t n) { size_t i = 0; for (; s[i] && i < n - 1; ++i) d[i] = (char)toupper((unsigned char)s[i]); d[i] = 0; }
+static int B5Wrap(int x, int y, int maxW, int lh, const char* s, DWORD rgb, float k, int font, int maxLines, bool draw = true)
+{
+    char buf[200]; int lines = 0;
+    while (s && *s && lines < maxLines) {
+        int n = (int)strlen(s), cut = n;
+        if (cut > 199) cut = 199;
+        while (cut > 0) {
+            char t[200]; memcpy(t, s, cut); t[cut] = 0;
+            if (B5TextW(t, font, k) <= maxW) break;
+            int sp = cut - 1; while (sp > 0 && s[sp] != ' ') --sp;
+            if (sp <= 0) break;
+            cut = sp;
+        }
+        if (cut <= 0) cut = n > 199 ? 199 : n;
+        memcpy(buf, s, cut); buf[cut] = 0;
+        if (draw) B5Text(x, y + lines * lh, buf, rgb, k, font);
+        ++lines; s += cut; while (*s == ' ') ++s;
+    }
+    return lines;
+}
+static const char* EnhHelpOf(int idx, char* hb, size_t n)
+{
+    const EnhItem& it = kEnh[idx];
+    const char* help = it.help;
+    if (it.kind == EK_HEADER) help = g_secOpen[idx] ? "A or left: close this section" : "A or right: open this section";
+    if (it.kind == EK_ACTION && AchRowLevel(it.label) != -2) help = "Press A to see every achievement of this level";
+    if (const char* nd = (it.kind == EK_HEADER) ? nullptr : EnhNeeds(it)) help = nd;
+    if (it.kind == EK_BIND || it.kind == EK_BIND_HOSTAGE) {
+        int a = ActionOf(*(Target*)it.ptr);
+        if (a < 0)                                     BindIniHelp(*(Target*)it.ptr, hb, (int)n);
+        else if (a == 0 && it.kind == EK_BIND_HOSTAGE) snprintf(hb, n, "While holding a shield this button does its normal action");
+        else if (a == 0)                               snprintf(hb, n, "This button does nothing");
+        else snprintf(hb, n, "Sends %s%s", kActions[a].keyName, it.pad == P_BACK && kActions[a].t.value != VK_ESCAPE ? " - keep In-game menu on a button" : "");
+        help = hb;
+    }
+    return help;
+}
+static void EnhDrawB5(int W, int H, int fh)
+{
+    g_b5k = W / 1280.0f; g_b5ky = H / 800.0f;
+    const int fUI = g_drawFont, fTitle = 1;
+    const float kUI = 17.0f / (fh > 0 ? fh : 15);       // row text ~17 design px tall
+    const float kSide = 17.0f / (fh > 0 ? fh : 15);
+    int tfh = 22; __try { tfh = ((int (__cdecl*)(int))0x5185B0)(fTitle); } __except (1) { tfh = 22; }
+    if (tfh <= 4) tfh = 22;
+    const DWORD cWhite = 0xEBEBEB, cGrey = 0x969696, cVal = 0xC8C8C8, cRed = 0x1818B2, cInk = 0x1E1A1C, cHelp = 0xC8C8C8;
+    char line[200], up[120];
+    // dim the paused game, sidebar, torn edge, skull
+    B5Fill(0, 0, 1280, 800, 0, 0, 0, 205);           // v1.07: darker (user: the black looked faded)
+    B5Fill(0, 0, 262, 800, 0, 0, 0, 255);
+    B5Pic(1, 232, 0, 60, 800, 255, 255, 255, 255);
+    B5Pic(0, 0, 470, 250, 290, 255, 255, 255, 240);
+    // logo
+    if (!g_enhFromOptions) {                 // v1.05: from Options the game's own title bar + paper panel sit here
+        B5Text(28, 34, "EXTENDED", cWhite, 37.0f / tfh, fTitle);
+        B5Text(28, 74, "CUT", cRed, 37.0f / tfh, fTitle);
+    }
+    // pages
+    const int pcV = EnhPagesVisible();
+    int py = 165, pstep = pcV > 8 ? 380 / pcV : 44;
+    for (int i = 0; i < pcV; ++i) { int p = EnhPageAt(i);
+        B5Upper(up, kEnhPages[p], sizeof(up));
+        float pk = kSide; int pw = B5TextW(up, fUI, pk);
+        if (pw > 160) pk *= 160.0f / pw;                     // v1.08: long page names fit the bar / edge
+        if (p == g_enhPage) {
+            B5Pic(3, 2, py - 6, 210, 40, 255, 255, 255, 255);
+            B5Pic(2, 8, py - 2, 26, 26, 178, 24, 24, 255);
+            B5Text(44, py, up, cInk, pk, fUI);
+        } else B5Text(44, py, up, cGrey, pk, fUI);
+        py += pstep;
+    }
+    // page title
+    B5Upper(up, kEnhPages[g_enhPage], sizeof(up));
+    B5Text(312, 62, up, 0x000000, 40.0f / tfh, fTitle);
+    B5Text(310, 60, up, cWhite, 40.0f / tfh, fTitle);
+    const int x0 = 310, xr = 900, step = 32;
+    int y = 120;
+    if (g_achDetail != -2 && g_enhPage == 7) {      // v0.72 level page keeps its own drawing, in the content area
+        int lh = B5Y(step); if (lh < fh + 2) lh = fh + 2;
+        AchDrawLevelPage(B5X(x0), B5Y(y), W, H, fh, lh, (int)(fh * g_enhCharW + 0.5f), cWhite, cGrey, 0x707070, false, cRed);
+        return;
+    }
+    static int vis[kEnhCount];
+    int n = EnhVisible(g_enhPage, vis);
+    static int scroll = 0, scrollPage = -1;
+    if (scrollPage != g_enhPage) { scroll = 0; scrollPage = g_enhPage; }
+    int rows = (700 - y) / step; if (rows < 5) rows = 5;
+    if (n <= rows) scroll = 0;
+    else {
+        if (g_enhSel < scroll) scroll = g_enhSel;
+        if (g_enhSel >= scroll + rows) scroll = g_enhSel - rows + 1;
+        if (scroll > n - rows) scroll = n - rows;
+        if (scroll < 0) scroll = 0;
+    }
+    if (scroll > 0) B5Text(x0, y - 22, "...", cGrey, kUI, fUI);
+    for (int k = scroll; k < n && k < scroll + rows; ++k) {
+        const EnhItem& it = kEnh[vis[k]];
+        bool sel = k == g_enhSel;
+        B5Upper(up, it.label, sizeof(up));
+        if (it.kind == EK_HEADER) {
+            int hi = vis[k];
+            if (g_secOpen[hi]) snprintf(line, sizeof(line), "- %s -", up); else snprintf(line, sizeof(line), "+ %s (%d)", up, EnhSectionSize(hi));
+            if (sel) B5Pic(3, x0 - 14, y - 6, xr - x0 + 30, 30, 255, 255, 255, 255);
+            float hk = kUI * 0.88f; int hw = B5TextW(line, fUI, hk);
+            if (hw > xr - x0) hk *= (float)(xr - x0) / hw;      // v1.07: long headings fit the row
+            B5Text(x0, y + 2, line, sel ? cInk : cRed, hk, fUI);
+            y += step; continue;
+        }
+        const char* need = EnhNeeds(it);
+        if (it.pad >= 0) snprintf(line, sizeof(line), "%s  %s", EnhBtn(it.pad), up); else snprintf(line, sizeof(line), "%s", up);
+        if (sel) B5Pic(3, x0 - 14, y - 6, xr - x0 + 30, 30, 255, 255, 255, 255);
+        // v1.08: label and value never overlap - the value shrinks first (to 70 %), then the label
+        char vt[96] = "";
+        if (it.kind != EK_ACTION) { char v0[48]; EnhValueText(it, v0, sizeof(v0)); char u0[64]; B5Upper(u0, v0, sizeof(u0)); snprintf(vt, sizeof(vt), sel ? "<  %s  >" : "%s", u0); }
+        float lk = kUI, vk = kUI;
+        { int lw = B5TextW(line, fUI, lk), vw = vt[0] ? B5TextW(vt, fUI, vk) : 0, room = xr - x0 - 24;
+          if (lw + vw > room && vw > 0) { float f = (float)(room - lw) / vw; if (f < 0.7f) f = 0.7f; vk *= f; vw = B5TextW(vt, fUI, vk); }
+          if (lw + vw > room) lk *= (float)(room - vw) / (lw > 0 ? lw : 1); }
+        B5Text(x0, y, line, sel ? cInk : need ? 0x707070 : cWhite, lk, fUI);
+        char v[48];
+        if (it.kind == EK_ACTION) {
+            if (sel && !(g_enhPage == 7 && it.label == g_achRowLabel[0])) {
+                snprintf(line, sizeof(line), "%s  %s", EnhBtn(P_SOUTH), AchRowLevel(it.label) != -2 ? "OPEN" : "DO IT");
+                B5Text(xr - B5TextW(line, fUI, kUI), y, line, cRed, kUI, fUI);
+            }
+        } else {
+            (void)v;
+            B5Text(xr - B5TextW(vt, fUI, vk), y + (int)((kUI - vk) * 8), vt, sel ? cRed : need ? 0x707070 : cVal, vk, fUI);
+        }
+        y += step;
+    }
+    if (scroll + rows < n) B5Text(x0, y, "...", cGrey, kUI, fUI);
+    // help box
+    if (g_enhSel < n) {
+        char hb[160]; const char* help = EnhHelpOf(vis[g_enhSel], hb, sizeof(hb));
+        B5Upper(up, kEnh[vis[g_enhSel]].label, sizeof(up));
+        // v1.07: the box fits its text (user: a fixed box covered long rows for no reason)
+        int tl = B5Wrap(958, 140, 275, 26, up, cRed, 20.0f / tfh, fTitle, 3, false);
+        int hl2 = help ? B5Wrap(958, 0, 275, 22, help, cHelp, kUI * 0.92f, fUI, 14, false) : 0;
+        int boxH = 20 + tl * 26 + (hl2 ? 18 + hl2 * 22 : 0) + 16;
+        B5Fill(940, 120, 310, boxH, 0, 0, 0, 235);
+        int hl = B5Wrap(958, 140, 275, 26, up, cRed, 20.0f / tfh, fTitle, 3);
+        if (help) B5Wrap(958, 140 + hl * 26 + 18, 275, 22, help, cHelp, kUI * 0.92f, fUI, 14);
+    }
+    // button line, right of the sidebar
+    snprintf(line, sizeof(line), "%s %s CHANGE     %s %s PAGE     %s %s SECTION     %s DEFAULT     %s SAVE & CLOSE",
+             EnhBtn(P_DLEFT), EnhBtn(P_DRIGHT), EnhBtn(P_LB), EnhBtn(P_RB), EnhBtn(P_LT), EnhBtn(P_RT), EnhBtn(P_WEST), EnhBtn(P_EAST));
+    B5Text(310, 754, line, cGrey, kUI * 0.95f, fUI);
+    if (g_enhStatus[0] && GetTickCount() - g_enhStatusAt < 3000) B5Text(310, 726, g_enhStatus, cWhite, kUI * 0.9f, fUI);
+    else if (g_enhDirty) B5Text(310, 726, "Changed - saved to ExtendedCut.ini when you close", 0x808080, kUI * 0.9f, fUI);
+}
+extern bool g_frameEndHooked;
+extern volatile bool g_inFrameEnd;   // v1.03: the B5 menu is drawn last, right before EndScene
 static void EnhDraw()
 {
+    CostumeKeyTick();   // v1.12
+    {   // v1.03: the new layout is drawn at the end of the frame (over the game's own Options panel / in-game menu,
+        // which the game draws AFTER the pause / text hooks - laptop screenshots Nov 20); everything else as before
+        bool b5 = (g_enhOpen && !g_showLayout && g_enhLayout == 1 && (!g_enhFromOptions || PausedInLevel())) || PaperLate();   // v1.38: + paper in a level
+        if (g_frameEndHooked && b5 != g_inFrameEnd) return;
+        if (!g_frameEndHooked && g_inFrameEnd) return;
+    }
     bool plain = PlainPause();
     bool pausePic = plain && g_betaPausePic && g_pausePicLoaded;   // v0.50.9
     if (!g_enhOpen && !(plain && g_enhPauseHint && g_pad) && !pausePic) return;
@@ -6908,7 +9293,12 @@ static void EnhDraw()
         return;
     }
     if (g_showLayout) { EnhLayout(W, H, fh); PaperColor(255, 255, 255, 255); *color = saved; return; }   // v0.33
+    // v1.02: opened from the Options list INSIDE a level = the B5 layout too (the paper look needs the main menu's
+    // notebook, which a level does not load - GitHub #1)
+    if (PaperLate()) { EnhDrawPaper(W, H, fh); PaperColor(255, 255, 255, 255); *color = saved; return; }   // v1.38: paper in a level (pause + Y or Options)
+    if (paper && PausedInLevel() && g_enhLayout == 1 && B5Ready()) { EnhDrawB5(W, H, fh); PaperColor(255, 255, 255, 255); *color = saved; return; }
     if (paper) { EnhDrawPaper(W, H, fh); PaperColor(255, 255, 255, 255); *color = saved; return; }   // v0.32
+    if (g_enhLayout == 1 && B5Ready()) { EnhDrawB5(W, H, fh); PaperColor(255, 255, 255, 255); *color = saved; return; }   // v1.01
     int x0 = (int)(W * g_enhX), y = (int)(H * g_enhY);
     // v0.31.5: from Options, line up with the game's own lists (Controls / Game Settings start at x 60, y ~105 px)
     if (paper) { x0 = W * 60 / 1280; y = H * 104 / 800; }
@@ -6924,21 +9314,21 @@ static void EnhDraw()
     int x = x0;
     int tabsC = 0;   // v0.52: same fallback as the paper menu when the 8 tabs do not fit
     const int pcV = EnhPagesVisible();
-    for (int p = 0; p < pcV; ++p) tabsC += (int)strlen(kEnhPages[p]) + 3;
+    for (int i = 0; i < pcV; ++i) tabsC += (int)strlen(kEnhPages[EnhPageAt(i)]) + 3;
     if (x0 + tabsC * cw < W - x0 / 2) {
-        for (int p = 0; p < pcV; ++p) {
+        for (int i = 0; i < pcV; ++i) { int p = EnhPageAt(i);
             snprintf(line, sizeof(line), p == g_enhPage ? "[%s]" : " %s ", kEnhPages[p]);
             EnhText(x, y, line, p == g_enhPage ? kRed : kDim);
             x += (int)(strlen(line) + 1) * cw;
         }
     } else {
-        int pv = (g_enhPage + pcV - 1) % pcV, nx = (g_enhPage + 1) % pcV;
+        int cp = EnhPagePos(g_enhPage), pv = EnhPageAt((cp + pcV - 1) % pcV), nx = EnhPageAt((cp + 1) % pcV);
         snprintf(line, sizeof(line), "< %s ", kEnhPages[pv]); EnhText(x, y, line, kDim); x += (int)(strlen(line) + 1) * cw;
         snprintf(line, sizeof(line), "[%s]", kEnhPages[g_enhPage]); EnhText(x, y, line, kRed); x += (int)(strlen(line) + 1) * cw;
-        snprintf(line, sizeof(line), " %s >  (page %d/%d)", kEnhPages[nx], g_enhPage + 1, pcV); EnhText(x, y, line, kDim);
+        snprintf(line, sizeof(line), " %s >  (page %d/%d)", kEnhPages[nx], cp + 1, pcV); EnhText(x, y, line, kDim);
     }
     y += lh + lh / 2;
-    if (g_achDetail != -2 && g_enhPage == 5) { AchDrawLevelPage(x0, y, W, H, fh, lh, cw, kWhite, kGrey, kDim, false, kRed); *color = saved; return; }   // v0.72
+    if (g_achDetail != -2 && g_enhPage == 7) { AchDrawLevelPage(x0, y, W, H, fh, lh, cw, kWhite, kGrey, kDim, false, kRed); *color = saved; return; }   // v0.72
     static int vis[kEnhCount];
     int n = EnhVisible(g_enhPage, vis);
     // v0.29: long pages scroll - keep the selected row (and its heading) on screen
@@ -6986,7 +9376,7 @@ static void EnhDraw()
         if (const char* nd = (it.kind == EK_HEADER) ? nullptr : EnhNeeds(it)) help = nd;
         if (it.kind == EK_BIND || it.kind == EK_BIND_HOSTAGE) {
             int a = ActionOf(*(Target*)it.ptr);
-            if (a < 0)                                   snprintf(hb, sizeof(hb), "Set in ExtendedCut.ini - left/right picks an action instead");
+            if (a < 0)                                   BindIniHelp(*(Target*)it.ptr, hb, (int)sizeof(hb));
             else if (a == 0 && it.kind == EK_BIND_HOSTAGE) snprintf(hb, sizeof(hb), "While holding a shield this button does its normal action");
             else if (a == 0)                             snprintf(hb, sizeof(hb), "This button does nothing");
             else snprintf(hb, sizeof(hb), "Sends %s%s", kActions[a].keyName,
@@ -6996,7 +9386,7 @@ static void EnhDraw()
         if (help) y += (EnhHelpWrapped(x0, y, W - x0 - (int)(W * 0.04f), lh, help, kGrey) - 1) * lh;
     }
     y += lh * 2;
-    snprintf(line, sizeof(line), "%s %s change    %s %s tab    %s %s section    %s defaults    %s save & close",
+    snprintf(line, sizeof(line), "%s %s change    %s %s tab    %s %s section    %s default    %s save & close",
              EnhBtn(P_DLEFT), EnhBtn(P_DRIGHT), EnhBtn(P_LB), EnhBtn(P_RB), EnhBtn(P_LT), EnhBtn(P_RT), EnhBtn(P_WEST), EnhBtn(P_EAST));
     EnhText(x0, y, line, kGrey);
     y += lh;
@@ -7071,10 +9461,13 @@ static void __cdecl OnTextGate()
 {
     g_skipText = 0;
     if (!g_enhOpen || (!g_enhFromOptions && !g_showLayout)) return;   // v0.33: also for the layout picture
-    g_skipText = 1;
+    g_skipText = (g_textCaller == 0x48CE49 && g_enhLayout == 1 && PausedInLevel()) ? 0 : 1;   // v1.05: rows rewritten above
     // v0.31.3: draw with the LAST game text of the frame (= after the menu's paper panels and backgrounds):
     // the number of texts per frame is learned from the previous frame; if a frame ends without a draw (the count
     // changed), the menu is drawn at the first text of the next frame instead.
+    // v1.06: back to "the previous frame's text count" (v0.31.3). v0.97's "smallest count of the last 8 frames" drew the
+    // menu too EARLY on frames with more texts (= under the game's later panels) -> it made the main-menu Options
+    // screen flicker (user Nov 21). GitHub #1's real cause was the stand-in notebook (fixed v1.02).
     static LARGE_INTEGER last = {};
     static int count = 0, prevCount = 0; static bool drawn = false;
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
@@ -7147,6 +9540,17 @@ static void InstallEnhancements()
     g_enhCharW = F("CharWidth", 0.8f, 0.3f, 2.0f);
     InitActions();
     EnsureDefaultsFile();
+    // v1.39 (user: the paper is for the game's in-game menu -> Options -> Extended Menu; pause + Y keeps the new dark
+    // menu): once - Layout back to 1 (v1.38 had set 0) and the Cheats & Debug tab on; after that the player's choice stays
+    if (!GetPrivateProfileIntA("Enhancements", "MenuLook139", 0, ini)) {
+        WritePrivateProfileStringA("Enhancements", "Layout", "1", ini);
+        WritePrivateProfileStringA("Enhancements", "DeveloperMode", "1", ini);
+        WritePrivateProfileStringA("Enhancements", "MenuLook139", "1", ini);
+        WritePrivateProfileStringA("Enhancements", "MenuLook138", NULL, ini);
+        g_devMode = 1;
+        Log("menu: v1.39 - pause + Y = the dark menu, Options route = paper, Cheats & Debug tab on (once)");
+    }
+    g_enhLayout = GetPrivateProfileIntA("Enhancements", "Layout", 1, ini);   // v1.01: 1 = B5, 0 = old text layout
     GetPrivateProfileStringA("Enhancements", "Font", "Interface", buf, sizeof(buf), ini);
     for (char* c = buf; *c; ++c) if (*c == ';' || *c == ' ' || *c == '\t') { *c = 0; break; }
     g_enhFontSel = !_stricmp(buf, "Title") ? 1 : !_stricmp(buf, "Hud") ? 2 : !_stricmp(buf, "Current") ? 3 : 0;
@@ -7452,12 +9856,22 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
         if (char* s = strrchr(g_dir, '\\')) *s = 0;
         char logPath[MAX_PATH]; snprintf(logPath, sizeof(logPath), "%s\\ExtendedCut.log", g_dir);
         g_log = fopen(logPath, "w");
-        Log("The Punisher: Extended Cut v0.83%s loading (%s)", kBuildKind, g_dir);
+        Log("The Punisher: Extended Cut v1.47%s loading (%s)", kBuildKind, g_dir);
         {   // v0.50.4: hang reporter (needs a real handle of this = the game's main thread)
             HANDLE h = nullptr;
             if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,
                                 THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0))
                 CreateThread(nullptr, 0, HangWatch, h, 0, nullptr);
+        }
+        {   // v0.85 (user: clean up the Deck's game + launcher folders): a list of every file with size and date, written
+            // in the background to ExtendedCut_files.txt (this folder syncs back to the laptop). [Developer] FileList.
+            char ini[MAX_PATH]; snprintf(ini, sizeof(ini), "%s\\ExtendedCut.ini", g_dir);
+#ifdef EC_RELEASE
+            int want = GetPrivateProfileIntA("Developer", "FileList", 0, ini);
+#else
+            int want = GetPrivateProfileIntA("Developer", "FileList", 1, ini);
+#endif
+            if (want) CreateThread(nullptr, 0, FileInventory, nullptr, 0, nullptr);
         }
         {   // v0.50.2: every address in this plugin is for the US 1.0 pun.exe without copy protection (2 605 056 bytes,
             // timestamp 0x41C1F8A3, 4 sections). The disc exe (copy protected, 7 sections) and the UK / European exe
@@ -7560,6 +9974,9 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
         if (g_decalLayers < 1) g_decalLayers = 1; if (g_decalLayers > 4) g_decalLayers = 4;
         InstallDecalDiag();   // decal wrappers (layers + optional logging)
         InstallGore(ini);     // v0.44: Exploding heads, Blood on clothes, Bullet hit blood ([Gore])
+#ifndef EC_RELEASE
+        InstallTablesSwitch(ini);   // v1.40: preset tables (retail / uncut / ours) - before the game opens tables.vpp (v1.42: not in the release yet)
+#endif
         InstallPromptHook();  // v0.10: controller icons in the hint text
         InstallChoiceStick(); // v0.10: stick picture on the interrogation choice
         InstallConsoleStick(); // v0.28: console-style interrogation stick
@@ -7569,6 +9986,8 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
         InstallWeaponMods();     // v0.35: switch weapon add-ons on / off, M16 launcher HUD icon
         InstallWindowedAndWhispers(ini);   // v0.51: [Display] Windowed, [Beta] FlashbackWhispers
         InstallAlwaysFlashbacks(ini);      // v0.58: [Beta] AlwaysFlashbacks
+        InstallOutfit();                   // v1.10: [Costume] Outfit / PcSkin
+        InstallCostumeLoader(ini);         // v1.12: [Costume] Costume (Costumes\<name>\*.dds)
         PatchCall(0x46796A, (void*)Hook_Token, 0x4670C0);   // v0.13: tutorial texts for the pad
         PatchCall(0x4683C3, (void*)Hook_ExpandText, 0x4678E0); // v0.13.1: no quotes around icons
         PatchCall(0x467C04, (void*)Hook_ExpandText, 0x4678E0);
@@ -7581,4 +10000,57 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
         Log("decal layers %d, decal logging %s", g_decalLayers, g_decalDiag ? "on" : "off");
     }
     return TRUE;
+}
+
+// v0.85: file inventory for the folder clean-up - the game folder and the Costume Launcher folder next to it
+static void InvWalk(FILE* f, const char* root, const char* rel, int depth, int* n)
+{
+    if (depth > 12 || *n > 60000) return;
+    char pat[MAX_PATH * 2]; snprintf(pat, sizeof(pat), "%s%s%s\\*", root, *rel ? "\\" : "", rel);
+    WIN32_FIND_DATAA d; HANDLE h = FindFirstFileA(pat, &d);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!strcmp(d.cFileName, ".") || !strcmp(d.cFileName, "..")) continue;
+        char sub[MAX_PATH * 2]; snprintf(sub, sizeof(sub), "%s%s%s", rel, *rel ? "\\" : "", d.cFileName);
+        SYSTEMTIME st; FileTimeToSystemTime(&d.ftLastWriteTime, &st);
+        if (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            fprintf(f, "D\t%s\n", sub);
+            InvWalk(f, root, sub, depth + 1, n);
+        } else {
+            unsigned long long sz = ((unsigned long long)d.nFileSizeHigh << 32) | d.nFileSizeLow;
+            fprintf(f, "F\t%s\t%llu\t%04d-%02d-%02d %02d:%02d\n", sub, sz, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+        }
+        ++*n;
+    } while (FindNextFileA(h, &d));
+    FindClose(h);
+}
+static DWORD WINAPI FileInventory(LPVOID)
+{
+    Sleep(15000);                                        // after the game has started up
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    char game[MAX_PATH]; GetModuleFileNameA(NULL, game, MAX_PATH);
+    if (char* s = strrchr(game, '\\')) *s = 0;
+    char parent[MAX_PATH]; strcpy_s(parent, game);
+    if (char* s = strrchr(parent, '\\')) *s = 0;
+    char out[MAX_PATH], tmp[MAX_PATH];
+    snprintf(out, sizeof(out), "%s\\ExtendedCut_files.txt", g_dir); snprintf(tmp, sizeof(tmp), "%s.tmp", out);
+    FILE* f = nullptr; if (fopen_s(&f, tmp, "w") || !f) return 0;
+    int n = 0;
+    fprintf(f, "# Extended Cut file list - game folder: %s\n", game);
+    fprintf(f, "ROOT\tgame\n"); InvWalk(f, game, "", 0, &n);
+    WIN32_FIND_DATAA d; char pat[MAX_PATH]; snprintf(pat, sizeof(pat), "%s\\*", parent);
+    HANDLE h = FindFirstFileA(pat, &d);                  // launcher folder(s) next to the game: "...Launcher..."
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !strstr(d.cFileName, "Launcher")) continue;
+            char root[MAX_PATH]; snprintf(root, sizeof(root), "%s\\%s", parent, d.cFileName);
+            fprintf(f, "ROOT\tlauncher\t%s\n", d.cFileName); InvWalk(f, root, "", 0, &n);
+        } while (FindNextFileA(h, &d));
+        FindClose(h);
+    }
+    fprintf(f, "# %d entries\n", n);
+    fclose(f);
+    DeleteFileA(out); MoveFileA(tmp, out);
+    Log("file list: %d entries written to ExtendedCut_files.txt (game folder + launcher folder)", n);
+    return 0;
 }

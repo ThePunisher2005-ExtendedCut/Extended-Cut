@@ -1,11 +1,63 @@
 CHANGELOG
 =========
-0.1.10 (hotfix pre-release, Nov 20) - plugin v0.83
-- FIX (GitHub #1): the Extended menu opened from Esc -> Options INSIDE a level could flicker / show a stretched
-  blotch behind it. It drew the main menu's notebook picture, which a level does not load (the game hands back a
-  32x32 stand-in, stretched over the whole screen). That picture is now skipped when it is not loaded.
-- Nothing else changed (same game changes as 0.1.9). To update from 0.1.9: run Install again (it replaces the
-  plugin and keeps your settings).
+0.3.0 (pre-release, Nov 21 2026) - plugin v1.47, Costume Launcher 1.0
+COSTUMES
+- NEW: Costume tab in the Extended menu (the last tab, after Cheats & Debug). Pick any costume from your
+  library and the Punisher changes AT ONCE, even mid-level. 'Reload costume files' picks up new ones while the game
+  runs; optional keyboard key [Costume] NextKey (e.g. F7). Costumes no longer go into the level memory, so big HD
+  textures no longer hang the loading screen.
+- NEW: outfit switch - Level's own / Trench coat / T-shirt in every level (from the next level or checkpoint). New
+  installer part 'outfits'. In the T-shirt the pistols sit in the holsters and long guns go on the back, like in the
+  T-shirt levels.
+- NEW: the PC version's exclusive T-shirt skins as costumes: PC Exclusive 1980 / 1990 / 2000.
+- NEW: in-game skulls follow the costume (HUD, enemy and hotspot icons, menus); the worn skull is used only above
+  enemies and on interrogation / kill hotspots. Costume tab -> In-game skulls.
+- NEW: cutscenes show your costume's textures on the trench-coat Punisher.
+- Black Colt: now on the Costume tab -> Weapon Skin -> Colt .45 (Original / 04 Movie). True black now (the 0.2 one
+  had a green tint that showed as green spots; the installer fixes an installed one), and it stays black in the
+  holsters.
+KILLS AND GORE
+- FIX: meat hook kill - fat thugs use their own animation and now hang right on the hook (no rack clipping).
+- NEW: the tiki torch kill (Central Zoo) gets the meat hook kill's blood: wound marks, spray, spurts, the drip from the
+  wound and the floor pool. Same switch: Gore -> Special Interrogations & Kills. The installer part 'hooks' adds the
+  drip / pool effects to your zoo1.vpp.
+- FIX: meat hook / tiki pools stay on the floor (they could float when you stood higher), the drip keeps going.
+MENU AND CONTROLS
+- Pause + Y opens the dark Extended menu; in-game menu -> Options -> Extended Menu now shows the paper look like the
+  main menu (the installer part 'menuart' adds the paper to mini.vpp).
+- Cheats & Debug tab shown by default, before Costume.
+- Keyboard: keys no longer reach the game while the Extended menu is open; Esc / Backspace close it. Keys set in the
+  ini show their name (e.g. "Left Ctrl (from the ini)").
+- Photo mode: keyboard key [Photo] Key=F9; pause and the in-game menu work in photo mode (the in-game menu could
+  freeze before).
+SETTINGS
+- Black & white: kill effects default Off, Slaughter mode On. Our settings win over other mods (e.g. ermaccer's
+  PunisherPlugin); 'Game / other mods' lets the other mod decide.
+COSTUME LAUNCHER (first public release, 1.0)
+- Kit builder (parts, skulls, shirt backgrounds), costume library, smooth blacks, Default HD source; buttons 'Send
+  changes to the game' (only what changed), 'Send whole library to the game', 'Send to in-game picker'.
+- Texture templates are a separate download on Nexus.
+
+0.2.0 (pre-release, Nov 20) - plugin v1.09
+- NEW: the meat-hook quick kill in the Meat Packing Plant (restored, on all 23 hooks), with our own blood: wall
+  marks, spray from the chest wound, drip and pool. New installer part "hooks".
+- NEW: one switch for everything we add to the special interrogations and quick kills: Extended menu -> Gore ->
+  "Special Interrogations & Kills" (Extended / Original): meat hook, semi trailer, casket, propeller and fridge
+  blood. Every kill we remaster from now on goes under it.
+- NEW: redesigned Extended menu - pages in a dark sidebar with the faded skull and a torn edge, settings over the
+  dimmed paused game, the game's white brush bar on the selected row, help in its own box. Uses the game's own menu
+  art (new installer part "menuart"); [Enhancements] Layout=0 = the old text layout.
+- FIX (GitHub #1): the Extended menu opened from Options inside a level could flicker - it stretched a picture the
+  level does not load behind itself. Inside a level it now uses the new layout.
+- CHANGED: X in the Extended menu resets only the highlighted setting (it used to reset every setting at once).
+- CHANGED: in the Extended menu LT goes up a page and RT down (also with dual pistols in hand); the gun tension
+  camera moved to Restored content and its 2004 settings are called "Beta"; long names and values shrink to fit.
+- NEW: black Colt for the Punisher only. Your own Colt .45 (one or two) and its HUD / pickup picture in black with
+  a silver compensator; enemies keep the normal Colt. Extended menu -> Weapons -> Black Colt (on / off, works at
+  once). New installer part "blackcolt": made from your own Colt texture and added to mini.vpp.
+- NEW: photo mode hides the crosshair; the grenade / throwable counter uses the digital font too (Digital ammo
+  counter); the digital counters are drawn 15% bigger with a thin dark edge ([Beta] DigitalAmmoScale), and the edge
+  fades out with the numbers on a weapon switch.
 
 0.1.9 (tester / first GitHub pre-release, Nov 17) - plugin v0.82
 - Same game changes as 0.1.8 (no code change). Licence is now the GNU GPL v3.0 or later (LICENSE.txt), credits
