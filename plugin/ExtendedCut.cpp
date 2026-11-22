@@ -298,6 +298,15 @@ static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep);
 static bool g_sdlReady = false, g_sdlOk = false;
 static DWORD g_lastChoiceRead = 0;   // last time the interrogation-choice HUD (0x464A1E) read the sticks
 static SDL_Gamepad* g_pad = nullptr;
+static void UpdateMenuDirections();      // v1.48: the Extended menu also runs without a controller (keyboard)
+static void EnhUpdate();
+// v1.48 keyboard Extended menu: [Enhancements] KeyboardKey opens it while paused in a level; inside it the window
+// procedure turns keys into menu presses (arrows / W A S D, Enter / Space, Esc / Backspace, Q / E, Page Up / Down,
+// Tab / Shift+Tab, R / Delete). Controllers work as before - both can be used.
+enum { KB_UP, KB_DOWN, KB_LEFT, KB_RIGHT, KB_A, KB_B, KB_X, KB_LB, KB_RB, KB_LT, KB_RT, KB_N };
+static int  g_menuKeyVk = VK_F2;
+static volatile LONG g_kbPress[KB_N];
+static bool g_kbUsed = false;            // last menu input came from the keyboard: the button lines show keys
 static int g_padType = 0;            // SDL_GamepadType of the connected pad (v0.10, for the prompt style)
 static bool g_down[P_COUNT];
 static bool g_wheelPrev[P_COUNT];   // wheel "click" edges (sent once per press)
@@ -406,7 +415,7 @@ static void PadUpdate()
     memset(g_down, 0, sizeof(g_down));
     memset(g_raw, 0, sizeof(g_raw));
     if (!g_pad && g_photo && !g_photoKeyVk) PhotoExit();      // v0.50.1: pad gone - leave photo mode (else the game stays frozen)
-    if (!g_pad) { g_rx = g_ry = 0; g_rxLin = g_ryLin = 0; if (g_photoKeyVk) PhotoFrame(); return; }
+    if (!g_pad) { g_rx = g_ry = 0; g_rxLin = g_ryLin = 0; if (g_photoKeyVk) PhotoFrame(); UpdateMenuDirections(); EnhUpdate(); return; }   // v1.48: + keyboard menu
 
     g_down[P_SOUTH] = Btn(SDL_GAMEPAD_BUTTON_SOUTH);
     g_down[P_EAST]  = Btn(SDL_GAMEPAD_BUTTON_EAST);
@@ -8502,7 +8511,23 @@ static LRESULT CALLBACK EcWndProc(HWND h, UINT m, WPARAM w, LPARAM l)
         && !(g_cfg.map[P_BACK].kind == T_KEY && (int)w == g_cfg.map[P_BACK].value))                     // the Start / Back keys pause
         return 0;                                        // v1.21: photo mode keys do not move / shoot the Punisher
     if (g_enhOpen && (m == WM_KEYDOWN || m == WM_CHAR)) {
-        if (m == WM_KEYDOWN && !(l & (1 << 30)) && (w == VK_ESCAPE || w == VK_BACK)) g_kbClose = true;
+        if (m == WM_KEYDOWN) {                           // v1.48: keyboard menu (held arrows repeat, the rest do not)
+            bool rep = (l & (1 << 30)) != 0; int k = -1;
+            switch (w) {
+            case VK_UP:    case 'W': k = KB_UP; break;
+            case VK_DOWN:  case 'S': k = KB_DOWN; break;
+            case VK_LEFT:  case 'A': k = KB_LEFT; break;
+            case VK_RIGHT: case 'D': k = KB_RIGHT; break;
+            case VK_RETURN: case VK_SPACE: if (!rep) k = KB_A; break;
+            case VK_ESCAPE: case VK_BACK:  if (!rep) k = KB_B; break;
+            case 'R': case VK_DELETE:      if (!rep) k = KB_X; break;
+            case 'Q': case VK_PRIOR:       if (!rep) k = KB_LB; break;
+            case 'E': case VK_NEXT:        if (!rep) k = KB_RB; break;
+            case VK_TAB: if (!rep) k = (GetKeyState(VK_SHIFT) & 0x8000) ? KB_LT : KB_RT; break;
+            }
+            if (g_menuKeyVk && (int)w == g_menuKeyVk && !rep) k = KB_B;   // the open key closes it again (like Y)
+            if (k >= 0) InterlockedIncrement(&g_kbPress[k]);
+        }
         return 0;
     }
     return CallWindowProcA(g_ecPrevWndProc, h, m, w, l);
@@ -8594,15 +8619,37 @@ static void EnhUpdate()
     static bool prev[P_COUNT];
     bool edge[P_COUNT];
     for (int i = 0; i < P_COUNT; ++i) { edge[i] = g_raw[i] && !prev[i]; prev[i] = g_raw[i]; }
+    LONG kb[KB_N]; for (int i = 0; i < KB_N; ++i) kb[i] = InterlockedExchange(&g_kbPress[i], 0);   // v1.48
     PausePicBank(g_betaPausePic && PausedInLevel());   // v0.50.9
     if (!g_enhOpen) {
         static bool wasPlain = false;
         bool plain = g_pad && PlainPause();
         if (plain != wasPlain) { wasPlain = plain; if (plain) Log("pause screen: enhancements menu available (%s)", kPadNames[g_enhOpenBtn]); }
-        if (plain && g_enhOpenBtn >= 0 && edge[g_enhOpenBtn]) EnhOpen();
+        if (plain && g_enhOpenBtn >= 0 && edge[g_enhOpenBtn]) { g_kbUsed = false; EnhOpen(); return; }
+        // v1.48: keyboard key - on the plain pause screen of a level (like pause + Y; the game's Esc menu draws over
+        // ours, there Options -> Extended Menu is the way), not in photo mode
+        static bool kWas = false; bool k = false;
+        if (g_menuKeyVk) {
+            HWND fw = GetForegroundWindow(); DWORD pid = 0; if (fw) GetWindowThreadProcessId(fw, &pid);
+            if (pid == GetCurrentProcessId()) k = (GetAsyncKeyState(g_menuKeyVk) & 0x8000) != 0;
+        }
+        if (k && !kWas && !g_photo && PlainPause()) {
+            g_kbUsed = true; g_enhFromOptions = false; EnhOpen(); Log("enhancements menu: opened with the keyboard key");
+        }
+        kWas = k;
         return;
     }
-    if (!g_pad && g_devMenuPreview != -98) { EnhClose("controller gone"); return; }   // v1.03 dev: MenuPreview=-98 keeps it open without a pad (laptop screenshots)
+    {   // v1.48: keyboard presses count as the pad's (both work)
+        bool any = false;
+        for (int i = 0; i < 4; ++i) if (kb[i]) { g_dirPulse[i] = true; any = true; }
+        static const int padOf[KB_N] = { -1, -1, -1, -1, P_SOUTH, P_EAST, P_WEST, P_LB, P_RB, P_LT, P_RT };
+        for (int i = KB_A; i < KB_N; ++i) if (kb[i]) { edge[padOf[i]] = true; any = true; }
+        if (any) g_kbUsed = true;
+        else {                                           // a pad press switches the button lines back to pad icons
+            for (int i = 0; i < P_COUNT; ++i) if (edge[i]) g_kbUsed = false;
+            for (int i = 0; i < 4; ++i) if (g_dirPulse[i]) g_kbUsed = false;
+        }
+    }
     if (!PausedInLevel() && !g_enhFromOptions) { EnhClose("game unpaused"); return; }
     static int vis[kEnhCount];
     int n = EnhVisible(g_enhPage, vis);
@@ -8627,7 +8674,6 @@ static void EnhUpdate()
             return;
         }
     }
-    if (g_kbClose) { g_kbClose = false; MenuSound(0x73D6BC); EnhClose("keyboard"); return; }   // v1.13
     if (edge[P_EAST] || edge[g_enhOpenBtn] || edge[P_START]) { MenuSound(0x73D6BC); EnhClose("button"); return; }
     int pc = EnhPagesVisible();
     if (!EnhPageShown(g_enhPage)) { g_enhPage = 0; g_enhSel = 0; n = EnhVisible(g_enhPage, vis); }
@@ -8896,7 +8942,8 @@ static void AchDrawLevelPage(int x0, int y, int W, int H, int fh, int lh, int cw
         y += (EnhHelpWrapped(x0, y, W - 2 * x0, lh, line, kInk) - 1) * lh;
     }
     y += lh * 2;
-    snprintf(line, sizeof(line), "%s %s  Choose      %s %s  Other level      %s  Back to the list",
+    if (g_kbUsed) snprintf(line, sizeof(line), "Up Down  Choose      Left Right  Other level      Esc  Back to the list");   // v1.48
+    else snprintf(line, sizeof(line), "%s %s  Choose      %s %s  Other level      %s  Back to the list",
              EnhBtn(P_DUP), EnhBtn(P_DDOWN), EnhBtn(P_DLEFT), EnhBtn(P_DRIGHT), EnhBtn(P_EAST));
     EnhText(x0, y, line, kSoft);
 }
@@ -8911,8 +8958,8 @@ static void EnhDrawPaper(int W, int H, int fh)
     // top right, where the game shows its own "A Select / B Back"
     int xr = W - W * 122 / 1280, yr = H * 30 / 800;
     const DWORD kHint = 0xC8EBC8;   // v0.32.5: the game's pale green hint colour, one space after the icon
-    snprintf(line, sizeof(line), "%s Change", EnhBtn(P_SOUTH)); EnhText(xr, yr, line, kHint);
-    snprintf(line, sizeof(line), "%s Back", EnhBtn(P_EAST));    EnhText(xr, yr + H * 20 / 800, line, kHint);
+    snprintf(line, sizeof(line), "%s Change", g_kbUsed ? "Enter" : EnhBtn(P_SOUTH)); EnhText(xr, yr, line, kHint);
+    snprintf(line, sizeof(line), "%s Back", g_kbUsed ? "Esc" : EnhBtn(P_EAST));    EnhText(xr, yr + H * 20 / 800, line, kHint);
     // page tabs: the current page sits on the brush bar
     int x = x0;
     int tabsW = 0;   // v0.52: 8 pages - if all tabs do not fit, show previous / current / next + "page n/8"
@@ -8994,7 +9041,7 @@ static void EnhDrawPaper(int W, int H, int fh)
         const EnhItem& it = kEnh[vis[g_enhSel]];
         const char* help = it.help;
         char hb[120];
-        if (it.kind == EK_HEADER) help = g_secOpen[vis[g_enhSel]] ? "A or left: close this section" : "A or right: open this section";
+        if (it.kind == EK_HEADER) help = g_secOpen[vis[g_enhSel]] ? (g_kbUsed ? "Enter or left: close this section" : "A or left: close this section") : (g_kbUsed ? "Enter or right: open this section" : "A or right: open this section");
         if (it.kind == EK_ACTION && AchRowLevel(it.label) != -2) help = "Press A to see every achievement of this level";   // v0.72
         if (const char* nd = (it.kind == EK_HEADER) ? nullptr : EnhNeeds(it)) help = nd;
         if (it.kind == EK_BIND || it.kind == EK_BIND_HOSTAGE) {
@@ -9009,7 +9056,8 @@ static void EnhDrawPaper(int W, int H, int fh)
         if (help) y += (EnhHelpWrapped(x0, y, W - 2 * x0, lh, help, kInk) - 1) * lh;
     }
     y += lh * 2;
-    snprintf(line, sizeof(line), "%s %s  Tab      %s %s  Section      %s  Default", EnhBtn(P_LB), EnhBtn(P_RB), EnhBtn(P_LT), EnhBtn(P_RT), EnhBtn(P_WEST));
+    if (g_kbUsed) snprintf(line, sizeof(line), "Q E  Tab      Tab  Section      R  Default");   // v1.48
+    else snprintf(line, sizeof(line), "%s %s  Tab      %s %s  Section      %s  Default", EnhBtn(P_LB), EnhBtn(P_RB), EnhBtn(P_LT), EnhBtn(P_RT), EnhBtn(P_WEST));
     EnhText(x0, y, line, kInk);
     if (g_enhStatus[0] && GetTickCount() - g_enhStatusAt < 3000) EnhText(x0, y + lh, g_enhStatus, kInk);
 }
@@ -9046,7 +9094,7 @@ static void EnhLayout(int W, int H, int fh, bool backHint = true)
     PaperColor(255, 255, 255, 255);
     PaperStretch(tex, (W - w) / 2, (H - h) / 2, w, h, 0, 0, tw, th);
     if (!backHint) return;
-    char line[80]; snprintf(line, sizeof(line), "%s Back", EnhBtn(P_EAST));
+    char line[80]; snprintf(line, sizeof(line), "%s Back", g_kbUsed ? "Esc" : EnhBtn(P_EAST));
     EnhText(W - W * 122 / 1280, H * 30 / 800, line, 0xC8EBC8);
 }
 // ---------------------------------------------------------------- v1.01: Extended menu layout "B5" (user's pick, Nov 20)
@@ -9123,7 +9171,7 @@ static const char* EnhHelpOf(int idx, char* hb, size_t n)
 {
     const EnhItem& it = kEnh[idx];
     const char* help = it.help;
-    if (it.kind == EK_HEADER) help = g_secOpen[idx] ? "A or left: close this section" : "A or right: open this section";
+    if (it.kind == EK_HEADER) help = g_secOpen[idx] ? (g_kbUsed ? "Enter or left: close this section" : "A or left: close this section") : (g_kbUsed ? "Enter or right: open this section" : "A or right: open this section");
     if (it.kind == EK_ACTION && AchRowLevel(it.label) != -2) help = "Press A to see every achievement of this level";
     if (const char* nd = (it.kind == EK_HEADER) ? nullptr : EnhNeeds(it)) help = nd;
     if (it.kind == EK_BIND || it.kind == EK_BIND_HOSTAGE) {
@@ -9244,7 +9292,8 @@ static void EnhDrawB5(int W, int H, int fh)
         if (help) B5Wrap(958, 140 + hl * 26 + 18, 275, 22, help, cHelp, kUI * 0.92f, fUI, 14);
     }
     // button line, right of the sidebar
-    snprintf(line, sizeof(line), "%s %s CHANGE     %s %s PAGE     %s %s SECTION     %s DEFAULT     %s SAVE & CLOSE",
+    if (g_kbUsed) snprintf(line, sizeof(line), "ARROWS MOVE / CHANGE     Q E PAGE     TAB SECTION     R DEFAULT     ESC SAVE & CLOSE");   // v1.48
+    else snprintf(line, sizeof(line), "%s %s CHANGE     %s %s PAGE     %s %s SECTION     %s DEFAULT     %s SAVE & CLOSE",
              EnhBtn(P_DLEFT), EnhBtn(P_DRIGHT), EnhBtn(P_LB), EnhBtn(P_RB), EnhBtn(P_LT), EnhBtn(P_RT), EnhBtn(P_WEST), EnhBtn(P_EAST));
     B5Text(310, 754, line, cGrey, kUI * 0.95f, fUI);
     if (g_enhStatus[0] && GetTickCount() - g_enhStatusAt < 3000) B5Text(310, 726, g_enhStatus, cWhite, kUI * 0.9f, fUI);
@@ -9263,7 +9312,7 @@ static void EnhDraw()
     }
     bool plain = PlainPause();
     bool pausePic = plain && g_betaPausePic && g_pausePicLoaded;   // v0.50.9
-    if (!g_enhOpen && !(plain && g_enhPauseHint && g_pad) && !pausePic) return;
+    if (!g_enhOpen && !(plain && g_enhPauseHint && (g_pad || g_menuKeyVk)) && !pausePic) return;   // v1.48: + keyboard
     if (!PickScale(&g_drawSx, &g_drawSy)) {
         static bool logged = false;
         if (!logged) { logged = true; Log("enhancements: no game text seen yet - menu not drawn"); }
@@ -9286,8 +9335,10 @@ static void EnhDraw()
     char line[160];
     if (!g_enhOpen) {
         if (pausePic) { EnhLayout(W, H, fh, false); PaperColor(255, 255, 255, 255); *color = saved; }   // v0.50.9: replaces the pause screen
-        if (!(g_enhPauseHint && g_pad)) { *color = saved; return; }
-        snprintf(line, sizeof(line), "%s  Extended Menu", EnhBtn(g_enhOpenBtn));
+        if (!(g_enhPauseHint && (g_pad || g_menuKeyVk))) { *color = saved; return; }
+        if (g_pad) snprintf(line, sizeof(line), "%s  Extended Menu", EnhBtn(g_enhOpenBtn));
+        else { Target t; t.kind = T_KEY; t.value = g_menuKeyVk; char kn[32]; TargetText(t, kn, sizeof(kn));
+               snprintf(line, sizeof(line), "%s  Extended Menu", kn); }   // v1.48
         EnhText((int)(W * 0.04f), H - lh * 2, line, kGrey);
         *color = saved;
         return;
@@ -9371,7 +9422,7 @@ static void EnhDraw()
         const EnhItem& it = kEnh[vis[g_enhSel]];
         const char* help = it.help;
         char hb[120];
-        if (it.kind == EK_HEADER) help = g_secOpen[vis[g_enhSel]] ? "A or left: close this section" : "A or right: open this section";
+        if (it.kind == EK_HEADER) help = g_secOpen[vis[g_enhSel]] ? (g_kbUsed ? "Enter or left: close this section" : "A or left: close this section") : (g_kbUsed ? "Enter or right: open this section" : "A or right: open this section");
         if (it.kind == EK_ACTION && AchRowLevel(it.label) != -2) help = "Press A to see every achievement of this level";   // v0.72
         if (const char* nd = (it.kind == EK_HEADER) ? nullptr : EnhNeeds(it)) help = nd;
         if (it.kind == EK_BIND || it.kind == EK_BIND_HOSTAGE) {
@@ -9386,7 +9437,8 @@ static void EnhDraw()
         if (help) y += (EnhHelpWrapped(x0, y, W - x0 - (int)(W * 0.04f), lh, help, kGrey) - 1) * lh;
     }
     y += lh * 2;
-    snprintf(line, sizeof(line), "%s %s change    %s %s tab    %s %s section    %s default    %s save & close",
+    if (g_kbUsed) snprintf(line, sizeof(line), "Arrows move / change    Q E tab    Tab section    R default    Esc save & close");   // v1.48
+    else snprintf(line, sizeof(line), "%s %s change    %s %s tab    %s %s section    %s default    %s save & close",
              EnhBtn(P_DLEFT), EnhBtn(P_DRIGHT), EnhBtn(P_LB), EnhBtn(P_RB), EnhBtn(P_LT), EnhBtn(P_RT), EnhBtn(P_WEST), EnhBtn(P_EAST));
     EnhText(x0, y, line, kGrey);
     y += lh;
@@ -9529,6 +9581,13 @@ static void InstallEnhancements()
     for (int i = 0; i < P_COUNT; ++i) if (!_stricmp(buf, kPadNames[i])) g_enhOpenBtn = i;
     if (g_enhOpenBtn >= P_LS_UP) g_enhOpenBtn = P_NORTH;
     g_enhPauseHint = (int)GetPrivateProfileIntA("Enhancements", "PauseHint", 1, ini);
+    {   // v1.48: keyboard key for the Extended menu (empty / NONE = none)
+        char kk[32]; GetPrivateProfileStringA("Enhancements", "KeyboardKey", "F2", kk, sizeof(kk), ini);
+        for (char* c = kk; *c; ++c) if (*c == ';' || *c == ' ' || *c == '\t') { *c = 0; break; }
+        g_menuKeyVk = 0;
+        if (kk[0] && _stricmp(kk, "NONE")) { Target t = ParseTarget(kk); if (t.kind == T_KEY) g_menuKeyVk = t.value; }
+        Log("enhancements: keyboard key %s", g_menuKeyVk ? kk : "none");
+    }
     auto F = [&](const char* k, float def, float lo, float hi) {
         GetPrivateProfileStringA("Enhancements", k, "", buf, sizeof(buf), ini);
         float v = buf[0] ? (float)atof(buf) : def;
@@ -9803,6 +9862,7 @@ static int __fastcall Hook_OptionsSel(void* self, void*)
     Log("options: entry %d picked (list count %d)", r, *(volatile int*)(0x74B528 + 0x168));
     if (r == 3) {                   // our entry: the game's switch (0 / 1 / 2) does nothing for -1
         g_enhFromOptions = true;
+        g_kbUsed = !g_pad;                          // v1.48: no controller = the hints show keys
         *(volatile int*)(0x74B938 + 0x60) = -1;   // v0.31.4: no selection bar on the hidden Options list
         EnhOpen();
         return -1;
@@ -9856,7 +9916,7 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
         if (char* s = strrchr(g_dir, '\\')) *s = 0;
         char logPath[MAX_PATH]; snprintf(logPath, sizeof(logPath), "%s\\ExtendedCut.log", g_dir);
         g_log = fopen(logPath, "w");
-        Log("The Punisher: Extended Cut v1.47%s loading (%s)", kBuildKind, g_dir);
+        Log("The Punisher: Extended Cut v1.48%s loading (%s)", kBuildKind, g_dir);
         {   // v0.50.4: hang reporter (needs a real handle of this = the game's main thread)
             HANDLE h = nullptr;
             if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,

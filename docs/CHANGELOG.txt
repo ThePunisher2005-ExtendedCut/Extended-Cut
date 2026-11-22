@@ -1,5 +1,13 @@
 CHANGELOG
 =========
+0.3.1 (hotfix, Nov 22 2026) - plugin v1.48
+- NEW: the Extended Menu works with keyboard and mouse only (no controller needed). F2 on the pause screen opens it
+  (or Esc -> Options -> Extended Menu); arrows / W A S D move and change, Enter / Space open sections, Q / E tabs,
+  Tab sections, R default, Esc / Backspace / F2 save and close. Before, it closed at once without a controller.
+  README section 4a has the full key list. Key: [Enhancements] KeyboardKey=F2 (NONE = off).
+- The pause screen shows "F2  Extended Menu" when no controller is connected; the menu's button line shows keys
+  after keyboard use. Controllers work exactly as before.
+
 0.3.0 (pre-release, Nov 21 2026) - plugin v1.47, Costume Launcher 1.0
 COSTUMES
 - NEW: Costume tab in the Extended menu (the last tab, after Cheats & Debug). Pick any costume from your

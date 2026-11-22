@@ -70,7 +70,7 @@ a file since, that file is left alone and the list says so).
 4. IN GAME
 ---------------------------------------------------------------------
 Extended Menu: press Start (pause), then Y. Or from the in-game menu: Options -> Extended Menu (paper look, like the
-main menu). Keyboard: see the hint on the pause screen; Esc / Backspace close it.
+main menu). Keyboard and mouse only (no controller): see 4a below.
 Tabs (LB / RB): Controls, Gameplay, Gore, HUD & Display, Restored content, Cheats & Debug, Costume. LT / RT jump
 between sections, A opens / closes a section. Changes save to scripts\ExtendedCut.ini; X = back to the default of
 the highlighted setting.
@@ -82,6 +82,28 @@ Photo mode: L3 + R3 (keyboard: F9, [Photo] Key in the ini).
 Blowtorch: Chop Shop (first level), grab a thug and take him to the welding torch - the skull marks the spot.
 Tiki torch impale: the Zoo's tiki bar torches (environment quick kill).
 Meat hook: Meat Packing Plant, grab a thug and take him to the wall hooks or the hook racks.
+
+4a. KEYBOARD AND MOUSE ONLY (no controller needed, 0.3.1)
+   Open the Extended Menu - two ways, both in a level:
+     a) Press Pause (the Pause / Break key). The pause screen shows "F2  Extended Menu" at the bottom left.
+        Press F2.
+     b) Press Esc (in-game menu) -> Options -> Extended Menu. Use this if your keyboard has no Pause key (many
+        laptops) - it is the same menu, on the notebook paper.
+   In the menu:
+     Up / Down arrows  (or W / S) ....... move between rows
+     Left / Right arrows (or A / D) ..... change the highlighted setting; on a section heading: open / close it
+     Enter or Space ..................... open / close a section, switch a setting, open an achievement level
+     Q / E  (or Page Up / Page Down) .... previous / next tab
+     Tab / Shift + Tab .................. jump to the next / previous section
+     R or Delete ........................ put the highlighted setting back to its default
+     Esc or Backspace (or F2 again) ..... save and close
+   Changes work at once and are saved to scripts\Extended Cut\ExtendedCut.ini when you close the menu.
+   The line at the bottom of the menu shows these keys once you use the keyboard (pad buttons again when you press
+   a controller button). The mouse is not used in the menu. While the menu is open the game gets no key presses.
+   Another key: ExtendedCut.ini -> [Enhancements] KeyboardKey=F2 (any key name: F3, F6, M, NUMPAD0 ...; NONE = off).
+   Keys already taken: F1 = the game's Help, F9 = photo mode.
+   With a controller nothing changes (Start, then Y); controller and keyboard can both be used, also in the same
+   visit to the menu.
 
 ---------------------------------------------------------------------
 5. STEAM DECK

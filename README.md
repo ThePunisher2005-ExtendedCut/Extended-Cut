@@ -7,7 +7,7 @@ One download works on both.
 - **Restored cut content** - e.g. the cut Chop Shop blowtorch interrogation, the tiki torch impale, the developers'
   own torn gib stumps (shipped turned inward), the meat-hook quick kill, early-development HUD
 - **Gore and engine fixes** - more blood options, raised engine limits, retail bug fixes
-- An in-game **Extended menu** for every option (pause with Start, then press Y)
+- An in-game **Extended menu** for every option (pause with Start, then press Y - keyboard only: Pause, then F2)
 - **Costumes in game** - switch your own costumes, the outfit (trench coat / T-shirt) and the Colt skin from the
   Extended menu while you play; costumes are made with the **Costume Launcher** (separate download)
 
@@ -44,6 +44,8 @@ Then download the latest zip from **[Releases](../../releases)** (tester builds 
      it needs Python 3.)
 4. **Read the list it prints.** Every line says what was changed, or why something was left alone.
 5. Start the game. Pause (Start / Esc) - the hint at the bottom shows how to open the **Extended menu**.
+   No controller? Press **Pause**, then **F2** (or Esc -> Options -> Extended Menu). Arrows move / change, Enter opens
+   sections, Q / E switch tabs, Esc saves and closes - full list in README.txt section 4a.
 
 **Uninstall:** run `Install.exe` again and type **3**.
 
