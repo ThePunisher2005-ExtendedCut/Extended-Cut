@@ -81,6 +81,18 @@ The full Steam Deck guide (performance settings, the Costume Launcher line, logs
 
 ---
 
+## Costume Launcher (optional)
+
+Dresses the Punisher in your own outfits - your skull on the shirt and on the in-game skull icons, outfits built
+from parts. With Extended Cut 0.3.0+ it sends your costumes into the game, where you switch them while you play
+(Extended menu -> Costume tab). Windows and Steam Deck (incl. Gaming Mode).
+
+- Download: **Punisher Costume Launcher 1.0.zip** from **[Releases](../../releases)** (or Nexus Mods). The
+  optional templates (shirt backgrounds, outfit parts, Default HD textures) are on Nexus Mods.
+- Source: the [`launcher/`](launcher) folder. Guide: [`launcher/README.txt`](launcher/README.txt).
+- No costume art or game textures are included - you bring your own pictures.
+
+
 ## Something went wrong?
 
 | What you see | What to do |
