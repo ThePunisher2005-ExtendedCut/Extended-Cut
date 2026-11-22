@@ -132,11 +132,11 @@ Meat hook: Meat Packing Plant, grab a thug and take him to the wall hooks or the
    Install / uninstall from Desktop Mode (install.sh / uninstall.sh), with the game closed.
 
 ---------------------------------------------------------------------
-6. COSTUME LAUNCHER (separate download)
+6. COSTUME LAUNCHER (separate download - Nexus Mods, "Punisher Costume Launcher")
 ---------------------------------------------------------------------
 Dresses the Punisher in your own outfits: a costume for the whole game or per mission, your own skull on the shirt
 and on the in-game skull icons. NO costume art comes with it - you bring your own pictures. Its folder has a full
-guide ("README - How to use.txt"); this is the short version.
+guide (README.txt in the launcher folder); this is the short version.
 
 6a. What you need
    Python 3 with Pillow and numpy.
