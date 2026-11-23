@@ -1,5 +1,16 @@
 CHANGELOG
 =========
+0.3.4 (hotfix, Nov 23 2026) - plugin v1.57
+- FIX: D-pad Left (Holster) did nothing on a normal install. The retail PC game has NO key for Holster, so the
+  controller's holster button only worked after binding Holster in the game's own Controls menu. The plugin now
+  gives Holster the H key when it has none (a key you set yourself is kept; H is only used if it is free).
+  Optional: [Settings] HolsterKey=H (NONE = leave the game's binding alone).
+- FIX (HUD size above 100 %): the interrogation meter's stress needle floated off the bar and the orange-zone timer
+  jumped above it; the interrogation choices (FACE SMASH ...) slid onto the A / Y button prompts at 150 %; long
+  speaker captions (2 lines, e.g. "COOPERATE, OR YOU WON'T LIVE TO REGRET IT.") showed a bright patch inside the
+  box and a strip sticking out. The meter and the choice wheel now grow as one piece, filled boxes grow with the
+  HUD, and pieces inside a box grow from the box's own corner.
+
 0.3.3 (hotfix, Nov 23 2026) - plugin v1.54
 - FIX: crash at every level start when Extended Menu -> Costume -> Outfit is set to Trench coat or T-shirt on an
   install where the installer part "outfits" is missing (it copies the other outfit's model from your own level

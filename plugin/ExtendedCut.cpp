@@ -120,6 +120,7 @@ struct Config {
     Target hostageMap[P_COUNT];       // [Hostage] overrides used while holding a human shield
     Target interMap[P_COUNT];         // v0.11 [Interrogation] overrides used while an interrogation runs
     int   helpKeyScan = 0;            // v0.11 [Settings] HelpKey: the game's Help action is moved from F1 to this key
+    int   holsterKeyScan = 0;         // v1.55 [Settings] HolsterKey: added to the game's Holster action (retail PC has none)
     float lookSensX = 900.0f;     // mouse counts per second at full right-stick deflection
     float lookSensY = 600.0f;
     float lookCurve = 2.0f;       // 1 = linear, 2 = finer aim near the centre
@@ -231,6 +232,9 @@ static void LoadConfig()
         GetPrivateProfileStringA("Settings", "HelpKey", "NONE", buf, sizeof(buf), ini);
         Target h = ParseTarget(buf);
         g_cfg.helpKeyScan = h.kind == T_KEY ? -h.value : 0;   // negative = virtual key, converted to a scan code later
+        GetPrivateProfileStringA("Settings", "HolsterKey", "H", buf, sizeof(buf), ini);
+        Target hk = ParseTarget(buf);
+        g_cfg.holsterKeyScan = hk.kind == T_KEY ? -hk.value : 0;
     }
     Log("config loaded from %s", ini);
 }
@@ -1314,6 +1318,42 @@ static void ApplyHelpKey()
     } __except (1) {}
 }
 
+// v1.55 (tester: D-pad holster only worked after binding it in the game's own controls menu): retail PC ships the
+// Holster action (6, controls-menu row "Holster", table 0x620A2C) with NO key - the readme's list has none either - so
+// the pad's "H" did nothing. Each action has two key slots (+0x28 / +0x2C, scan code, -1 = empty on retail; read by 0x45AA10).
+// [Settings] HolsterKey (default H) is added to an empty slot of Holster, unless that key already does something else
+// (then nothing is changed). A key the player set in the game's menu is kept. NONE = leave the game alone.
+static void ApplyHolsterKey()
+{
+    static int s_logged = 0;
+    if (!g_cfg.holsterKeyScan) return;
+    if (g_cfg.holsterKeyScan < 0) {
+        g_cfg.holsterKeyScan = VkToScan(-g_cfg.holsterKeyScan);
+        if (!g_cfg.holsterKeyScan) return;
+    }
+    __try {
+        DWORD so = *(volatile DWORD*)0x7CF804;
+        if (!so) return;
+        volatile int* b = (volatile int*)(so + 0x224 + 0x28);     // action a: b[a*4] = key slot 1, b[a*4+1] = slot 2
+        const int kHolster = 6, sc = g_cfg.holsterKeyScan;
+        if (b[kHolster * 4] == sc || b[kHolster * 4 + 1] == sc) return;
+        for (int a = 0; a < 0x22; ++a) {
+            if (a != kHolster && (b[a * 4] == sc || b[a * 4 + 1] == sc)) {
+                if (!(s_logged & 1)) { s_logged |= 1; Log("holster key: scan 0x%02X is already used by action %d - Holster left as the game has it", sc, a); }
+                return;
+            }
+        }
+        int slot = b[kHolster * 4] <= 0 ? 0 : b[kHolster * 4 + 1] <= 0 ? 1 : -1;   // empty = -1 (0 also skipped by the game)
+        if (slot < 0) {
+            if (!(s_logged & 2)) { s_logged |= 2; Log("holster key: both Holster slots are taken (0x%02X, 0x%02X) - left alone", b[kHolster * 4], b[kHolster * 4 + 1]); }
+            return;
+        }
+        b[kHolster * 4 + slot] = sc;
+        Log("holster key: game's Holster action had %s - scan 0x%02X added (slot %d)",
+            slot == 0 ? "no key" : "another key only", sc, slot + 1);
+    } __except (1) {}
+}
+
 // ---------------------------------------------------------------- v0.40: Developer page (the console switches)
 // The Xbox / PS2 builds have a developer console (228 commands). The PC build dropped the console but KEPT the game code
 // behind many switches - the variables are read and never written on PC (found by matching the Xbox code, see
@@ -1737,6 +1777,7 @@ static HRESULT WINAPI Hook_GetDeviceState(void* self, DWORD size, LPVOID data)
     // group+0xCC bit 0x2 = "+Permanent" = one of the 4 standard interrogations that work anywhere
     DWORD grp = *(volatile DWORD*)kCurrentInterrogation;
     ApplyHelpKey();
+    ApplyHolsterKey();
     UpdateFooterLabels();
     UpdateHitRumble();
     UpdateQuickKillRumble();
@@ -4860,11 +4901,44 @@ static const int kHudGroupMax = 1024;
 static HudGroup g_hudGroups[kHudGroupMax]; static int g_hudGroupN = 0;
 static DWORD g_hudPieces = 0, g_hudFrames = 0;
 
+// v1.56 (Deck, HUD size 125 / 150 %): the interrogation meter (0x464150: bar, stress needle, "0.1" orange-zone timer) and
+// the interrogation choice wheel (0x464990: GUN TENSION / CHOKE / PUNCH / FACE SMASH + stick) are drawn as pieces that
+// do not touch, so each got its own screen-third anchor: on an 800-line screen the timer (below the bar) grew upwards and
+// the bar downwards, and the wheel grew towards the screen centre's anchor - FACE SMASH landed on the A / Y prompts.
+// Now each of the two is a BLOCK: every piece drawn inside it uses one anchor = the centre of the block's own pieces in
+// the previous frame (native coordinates), so the block grows around its own middle and stays in one piece.
+struct HudBlock { float x0, y0, x1, y1; int n; float ax, ay; bool ok; };
+static HudBlock g_hudBlocks[2];
+static int g_hudBlock = -1;
+// v1.56b (Deck zoo1, long 2-line caption "COOPERATE, OR YOU WON'T LIVE TO REGRET IT."): inside a clip area moved by
+// 0x510870 the game draws in LOCAL coordinates (origin = clip corner). Those pieces were anchored by SCREEN thirds, so in
+// a box wider than a third of the screen the right end (local x ~414 -> "middle") grew around x 640 and landed inside
+// the box (bright "]" overlap + a strip sticking out). While such a clip is set, every piece grows from local 0,0.
+static volatile BYTE g_hudLocal = 0;
+static void __cdecl HudBlockBegin(int i) { g_hudBlock = i; g_hudBlocks[i].n = 0; }
+static void __cdecl HudBlockEnd(int i)
+{
+    HudBlock& b = g_hudBlocks[i];
+    if (b.n > 0) {
+        float ax = (b.x0 + b.x1) * 0.5f, ay = (b.y0 + b.y1) * 0.5f;
+        if (!b.ok) Log("hud size: %s block %.0f,%.0f..%.0f,%.0f (%d pieces) -> grows around %.0f,%.0f", i ? "choice wheel" : "interrogation meter",
+                       b.x0, b.y0, b.x1, b.y1, b.n, ax, ay);
+        b.ax = ax; b.ay = ay; b.ok = true;
+    }
+    g_hudBlock = -1;
+}
 static bool HudAnchor(float x, float y, float w, float h, float* ax, float* ay)
 {
     float W = (float)*(volatile int*)0x913250, H = (float)*(volatile int*)0x913254;
     if (W < 16 || H < 16 || w <= 0 || h <= 0) return false;
     if (w > W * 0.6f || h > H * 0.6f) return false;
+    if (g_hudLocal) { *ax = 0.0f; *ay = 0.0f; return true; }
+    if (g_hudBlock >= 0) {
+        HudBlock& b = g_hudBlocks[g_hudBlock];
+        if (b.n++ == 0) { b.x0 = x; b.y0 = y; b.x1 = x + w; b.y1 = y + h; }
+        else { b.x0 = min(b.x0, x); b.y0 = min(b.y0, y); b.x1 = max(b.x1, x + w); b.y1 = max(b.y1, y + h); }
+        if (b.ok) { *ax = b.ax; *ay = b.ay; return true; }
+    }
     const float m = 3.0f;
     for (int i = 0; i < g_hudGroupN; ++i) {
         const HudGroup& g = g_hudGroups[i];
@@ -4991,6 +5065,7 @@ static void __cdecl HudViewport(int x, int y, int w, int h)
     int x0 = x, y0 = y, w0 = w, h0 = h;
     int SW = *(volatile int*)0x913250, SH = *(volatile int*)0x913254;
     bool small = w > 0 && h > 0 && w <= SW * 0.6f && h <= SH * 0.6f;
+    g_hudLocal = 0;                                     // the clip itself is in screen coordinates
     if (g_hudScaling && w > 0 && h > 0 && HudAnchor((float)x, (float)y, (float)w, (float)h, &ax, &ay)) {
         ++g_hudClips;
         float k = g_hudK;
@@ -5000,6 +5075,7 @@ static void __cdecl HudViewport(int x, int y, int w, int h)
         if (w < 1) w = 1; if (h < 1) h = 1;
     }
     ((Viewport_t)0x510870)(x, y, w, h);
+    g_hudLocal = (g_hudScaling && ax >= 0 && (x0 != 0 || y0 != 0)) ? 1 : 0;   // v1.56b: pieces after this are local
     static DWORD seen[48]; static int seenN = 0;                  // v1.53b: each clip area once (in a level only)
     DWORD key = (DWORD)(size_t)_ReturnAddress() * 31u + (DWORD)w0 * 13u + (DWORD)h0;   // v1.53c: not x / y (the caption box slides in)
     bool fresh = true;
@@ -5012,14 +5088,53 @@ static void __cdecl HudViewport(int x, int y, int w, int h)
             *(volatile int*)0x91325C, *(volatile int*)0x913260, *(volatile int*)0x913270, *(volatile int*)0x913278, SW, SH, g_hudK);
     }
 }
+// v1.56: block wrappers at the two call sites in the HUD (0x465679 meter(player) - ESI also set by the caller;
+// 0x46568D wheel(), no stack arguments). Registers are kept exactly as the game set them.
+static DWORD g_fnHudMeter = 0x464150, g_fnHudWheel = 0x464990;
+static __declspec(naked) void Hook_HudMeterCall()
+{
+    __asm {
+        pushad
+        push 0
+        call HudBlockBegin
+        add  esp, 4
+        popad
+        push dword ptr [esp + 4]
+        call dword ptr [g_fnHudMeter]
+        add  esp, 4
+        pushad
+        push 0
+        call HudBlockEnd
+        add  esp, 4
+        popad
+        ret
+    }
+}
+static __declspec(naked) void Hook_HudWheelCall()
+{
+    __asm {
+        pushad
+        push 1
+        call HudBlockBegin
+        add  esp, 4
+        popad
+        call dword ptr [g_fnHudWheel]
+        pushad
+        push 1
+        call HudBlockEnd
+        add  esp, 4
+        popad
+        ret
+    }
+}
 static void AchFrame();
 static int __cdecl Hook_HudRender(DWORD player)          // 0x45DA12 -> 0x465530 (the whole HUD)
 {
     float k = HudScaleNow();
-    g_hudK = k; g_hudGroupN = 0;
+    g_hudK = k; g_hudGroupN = 0; g_hudLocal = 0;
     g_hudScaling = (k != 1.0f && !g_enhOpen && !g_photo) ? 1 : 0;
     int r = ((int (__cdecl*)(DWORD))0x465530)(player);
-    g_hudScaling = 0;
+    g_hudScaling = 0; g_hudBlock = -1; g_hudLocal = 0;
     if (!g_photo) { __try { AchFrame(); } __except (1) {} }   // v0.68: achievements in levels
     if (k != 1.0f && !g_enhOpen && !g_photo && ++g_hudFrames == 300) Log("hud size: x%.2f, %lu pieces + %lu clip areas scaled in 300 frames, %d groups last frame",
                                               k, g_hudPieces, g_hudClips, g_hudGroupN);
@@ -6527,6 +6642,15 @@ typedef void (__cdecl* FxRect_t)(int, int, int, int, int, int);
 static void __cdecl Hook_FxRect(int x, int y, int w, int h, int a, int b)
 {
     FxBigLog("rect", -1, x, y, w, h, _ReturnAddress());
+    // v1.56: filled rectangles are enlarged with the HUD too (interrogation stress needle 0x46488F / 0x46497C stayed at
+    // its native spot and floated off the bar; caption box fill 0x466F13). Full-screen tints pass (HudAnchor: > 60 %).
+    float ax, ay;
+    if (g_hudScaling && !g_hudInText && w > 0 && h > 0 && HudAnchor((float)x, (float)y, (float)w, (float)h, &ax, &ay)) {
+        float k = g_hudK;
+        int nx = HudRound(ax + (x - ax) * k), ny = HudRound(ay + (y - ay) * k);
+        int nx1 = HudRound(ax + (x + w - ax) * k), ny1 = HudRound(ay + (y + h - ay) * k);
+        x = nx; y = ny; w = max(1, nx1 - nx); h = max(1, ny1 - ny);
+    }
     if (g_fxLogLeft > 0) { --g_fxLogLeft; Log("fx tint rect %d,%d %dx%d", x, y, w, h); FxLogScreen("at tint"); }
     ((FxRect_t)0x5110B0)(x, y, w, h, a, b);
 }
@@ -9620,6 +9744,8 @@ static void InstallHudScale()
     PatchCallsTo(0x401000, 0x5EB000, 0x510C20, (void*)HudPic20, "stretched picture draw (HUD size)");
     PatchCallsTo(0x401000, 0x5EB000, 0x510BE0, (void*)HudQuad, "quad draw (HUD size)");
     PatchCallsTo(0x401000, 0x5EB000, 0x510870, (void*)HudViewport, "clip area (HUD size)");   // v0.82
+    PatchCall(0x465679, (void*)Hook_HudMeterCall, 0x464150);   // v1.56: interrogation meter = one block
+    PatchCall(0x46568D, (void*)Hook_HudWheelCall, 0x464990);   // v1.56: choice wheel = one block
     Log("hud size: %s (k %.2f at start), screen %dx%d", kHudScaleNames[g_hudScaleIdx], HudScaleNow(), *(volatile int*)0x913250, *(volatile int*)0x913254);
 }
 
@@ -9968,7 +10094,7 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
         if (char* s = strrchr(g_dir, '\\')) *s = 0;
         char logPath[MAX_PATH]; snprintf(logPath, sizeof(logPath), "%s\\ExtendedCut.log", g_dir);
         g_log = fopen(logPath, "w");
-        Log("The Punisher: Extended Cut v1.54%s loading (%s)", kBuildKind, g_dir);
+        Log("The Punisher: Extended Cut v1.57%s loading (%s)", kBuildKind, g_dir);
         {   // v0.50.4: hang reporter (needs a real handle of this = the game's main thread)
             HANDLE h = nullptr;
             if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,
