@@ -1,5 +1,5 @@
 @echo off
-rem The Punisher: Extended Cut - installer (put this folder inside your game folder, next to pun.exe)
+rem The Punisher: Extended Cut - installer (put this folder itself - not its contents - inside your game folder, next to pun.exe)
 cd /d "%~dp0"
 set PY=
 where py >nul 2>nul && set PY=py -3

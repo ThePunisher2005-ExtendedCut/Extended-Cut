@@ -1,5 +1,12 @@
 CHANGELOG
 =========
+0.3.3 (hotfix, Nov 23 2026) - plugin v1.54
+- FIX: crash at every level start when Extended Menu -> Costume -> Outfit is set to Trench coat or T-shirt on an
+  install where the installer part "outfits" is missing (it copies the other outfit's model from your own level
+  files). The plugin now checks first and keeps the level's own outfit instead of crashing (ExtendedCut.log:
+  "outfit: ... is not installed"). Run Install.exe -> 1 again to add the part; its log says why it was skipped.
+- README: clearer step 1 - put the Extended Cut folder itself inside the game folder, not its contents.
+
 0.3.2 (hotfix, Nov 22 2026) - plugin v1.53
 - FIX: speaker captions (the yellow boxes) and button prompts (Quick Kill, Grab, Interrogate, Kick door ...) were cut
   off on big screens (1080p and up, HUD size Auto / above 100 %). The HUD text was enlarged twice - now once, like

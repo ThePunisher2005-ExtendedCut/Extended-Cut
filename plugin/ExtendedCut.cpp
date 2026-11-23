@@ -3695,6 +3695,16 @@ static int __cdecl OutfitPick(int lvl)
         __try { r = ((int (__cdecl*)(const char*, int, int, int, int, int, int))0x50C910)(bank, 0, 0, -1, 1, 1, 0); }
         __except (1) { Log("outfit: loading %s failed", bank); }
         Log("outfit: texture bank %s - in the bank table before %d, after %d (load call %d)", bank, before, bankIdx("ec_outfit_"), r);
+        // v1.54 (tester crash 0x528C0C, write to 00000054, at every level start with Outfit = coat / T-shirt): without the
+        // installer part "outfits" the other outfit's model is not in mini.vpp - the object creator 0x4ADAA0 gets no
+        // model (0x528D60 = 0) and 0x528BC0 writes its anim set into model+0x54. The part always adds the model files and
+        // the texture bank together, and mini.vpp banks are in the bank table at level load (v1.17), so: no bank = no
+        // model -> keep the level's own outfit.
+        if (bankIdx(use == 2 ? "ec_outfit_tshirt" : "ec_outfit_trench") < 0) {
+            static int warned = 0;
+            if (warned++ < 3) Log("outfit: %s is not installed (installer part 'outfits' missing) - keeping the level's own outfit", bank);
+            use = lvl;
+        }
     }
     static const char* nm[4] = { "jungle", "prison", "T-shirt", "trench coat" };
     if (lvl != g_outfitLevel || use != g_outfitUsed)
@@ -9958,7 +9968,7 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
         if (char* s = strrchr(g_dir, '\\')) *s = 0;
         char logPath[MAX_PATH]; snprintf(logPath, sizeof(logPath), "%s\\ExtendedCut.log", g_dir);
         g_log = fopen(logPath, "w");
-        Log("The Punisher: Extended Cut v1.53%s loading (%s)", kBuildKind, g_dir);
+        Log("The Punisher: Extended Cut v1.54%s loading (%s)", kBuildKind, g_dir);
         {   // v0.50.4: hang reporter (needs a real handle of this = the game's main thread)
             HANDLE h = nullptr;
             if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,

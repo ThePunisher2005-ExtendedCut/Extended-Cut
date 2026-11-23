@@ -21,7 +21,9 @@ file before it touches it, and keeps each original as <file>.ec_original, so you
 ---------------------------------------------------------------------
 2. INSTALL
 ---------------------------------------------------------------------
-1. Put this whole folder INSIDE your game folder (the folder with pun.exe in it).
+1. Put the Extended Cut folder ITSELF inside your game folder (the folder with pun.exe in it) - do not unpack
+   its contents there. You end up with  <game folder>\Extended Cut\Install.exe  (the folder name may carry the
+   version, e.g. ExtendedCut_0.3.3 - that is fine).
 2. Pick ONE way - they all do exactly the same:
    a) Windows, easiest: double-click Install.exe, then choose 1 (Install). Python is built in.
       Some antivirus programs distrust any new .exe; CHECKSUMS.txt lists its SHA-256 if you want to verify it,

@@ -20,7 +20,7 @@ def game_folder():
         if ec_install.find(cand, 'pun.exe'):
             return cand
     print('pun.exe was not found next to this folder.')
-    print('Tip: put the Extended Cut folder INSIDE your game folder (the one with pun.exe), then start Install.exe again.')
+    print('Tip: put the Extended Cut folder ITSELF inside your game folder (the one with pun.exe) - do not unpack its contents there - then start Install.exe again.')
     while True:
         g = ask('Or type / paste the game folder here (empty = quit): ')
         if not g:
