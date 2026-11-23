@@ -235,6 +235,8 @@ static void LoadConfig()
     Log("config loaded from %s", ini);
 }
 
+// v1.52: the face fixes of v1.49-v1.51 were REMOVED (user: cutscene lip sync broke on the Deck). The code is in Git
+// (commit 5a9459d), the research in notesFACE_RESEARCH.md. This file = v1.49 dev (4347aad) + this version number.
 // ---------------------------------------------------------------- v0.8.1: player memory snapshot (to find the dual-wield state)
 // Hold L3 + R3 together: the player's data is written to playerdump_N.bin next to the .asi.
 static int g_dumpCount = 0;
@@ -3249,7 +3251,7 @@ static int g_splatTest = -1;   // v1.45 dev: [Developer] SplatTest=1 casts the s
 static void SplatTestTick()
 {
     if (g_splatTest < 0) { char di[MAX_PATH]; snprintf(di, MAX_PATH, "%s\\ExtendedCut.ini", g_dir); g_splatTest = GetPrivateProfileIntA("Developer", "SplatTest", 0, di); }
-    if (g_splatTest != 1) return;
+    if (g_splatTest != 1 && g_splatTest != 2) return;   // v1.49 dev: 2 = cast sideways into a wall (floor normals straight up look degenerate)
     static DWORD next = 0; DWORD now = GetTickCount();
     if (!next) next = now + 60000;
     if ((int)(now - next) < 0) return;
@@ -3259,8 +3261,13 @@ static void SplatTestTick()
         volatile float* R = (volatile float*)(pl + 0x28);
         static float pos[3], dir[3] = { 0.0f, -1.0f, 0.0f };
         pos[0] = *(volatile float*)(pl + 0x1C) - R[6] * 1.5f; pos[1] = *(volatile float*)(pl + 0x20) + 0.6f; pos[2] = *(volatile float*)(pl + 0x24) - R[8] * 1.5f;
+        if (g_splatTest == 2) {   // from the chest, along the Punisher's right (side) vector, slightly down, 4 m
+            pos[0] = *(volatile float*)(pl + 0x1C); pos[1] = *(volatile float*)(pl + 0x20) + 1.3f; pos[2] = *(volatile float*)(pl + 0x24);
+            static int side = 1; side = -side;
+            dir[0] = R[0] * side * 0.97f; dir[1] = -0.24f; dir[2] = R[2] * side * 0.97f;
+        }
         volatile float* T = (volatile float*)0x61F188; float o0 = T[0], o1 = T[4], o2 = T[8];
-        T[0] = 0.9f; T[4] = 0.9f; T[8] = 1.1f;   // test: big, to see it (still not visible on the laptop)
+        T[0] = g_splatTest == 2 ? 4.0f : 0.9f; T[4] = 0.9f; T[8] = 1.1f;   // test: big, to see it (still not visible on the laptop)
         *(volatile int*)0x6D8738 = *(volatile int*)0x676BCC;
         auto countW = []() -> int { int c = 0; DWORD h = *(volatile DWORD*)0x68AA38, r = h; while (r && c < 5000) { ++c; r = *(volatile DWORD*)(r + 0xD0); if (r == h) break; } return c; };
         int c0 = countW();
@@ -4831,6 +4838,10 @@ static float HudScaleNow()
     return (int)(k * 20.0f + 0.5f) / 20.0f;   // steps of 5 %
 }
 static volatile BYTE g_hudScaling = 0;       // 1 while the HUD draws with k != 1
+// v1.53: 1 while the plugin's own ENLARGED text (0x518800 with k) draws: its letters come back through the picture
+// hook (0x518964 -> 0x510C20) already enlarged and must not be enlarged a second time. They were (k x k = 2.25 at
+// 150 %): caption box / button prompt text (0x466AD0, clipped to its 1.5 x box) got cut off on 1080p+ (testers).
+static volatile BYTE g_hudInText = 0;
 static float g_hudK = 1.0f;
 struct HudGroup { float x0, y0, x1, y1, ax, ay; };
 // v0.55.1: was 64 - the HUD draws ~80 pieces a frame (more with the early development HUD); pieces past the limit
@@ -4860,6 +4871,16 @@ static bool HudAnchor(float x, float y, float w, float h, float* ax, float* ay)
     return true;
 }
 static int HudRound(float v) { return (int)floorf(v + 0.5f); }
+// v1.53 diag (captions / prompts cut off at HUD size > 100 %): after a small clip area, log the next pieces drawn
+static int g_hudDiagLines = 0, g_hudDiagFollow = 0;
+static const int kHudDiagMax = 0;      // v1.53: diag found the cause - off (raise to log again)
+static void HudDiagPiece(const char* what, void* ret, float x, float y, float w, float h, float ax, float ay, const char* t)
+{
+    if (g_hudDiagFollow <= 0 || g_hudDiagLines >= kHudDiagMax) return;
+    --g_hudDiagFollow; ++g_hudDiagLines;
+    Log("hud diag   %s from %08X: %.0f,%.0f %.0fx%.0f anchor %.0f,%.0f%s%s%s", what, (DWORD)(size_t)ret, x, y, w, h, ax, ay,
+        t ? " \"" : "", t ? t : "", t ? "\"" : "");
+}
 
 typedef int (__cdecl* Pic80_t)(int, int, int, DWORD, DWORD);
 typedef int (__cdecl* Pic20_t)(int, int, int, int, int, int, int, int, int, int, int, DWORD, DWORD, int);
@@ -4886,8 +4907,9 @@ static int __cdecl HudPic20(int tex, int x, int y, int w, int h, int u0, int v0,
 {
     FxBigLog("picture", tex, x, y, w, h, _ReturnAddress());
     float ax, ay;
-    if (g_hudScaling && tex != -1 && HudAnchor((float)x, (float)y, (float)w, (float)h, &ax, &ay)) {
+    if (g_hudScaling && !g_hudInText && tex != -1 && HudAnchor((float)x, (float)y, (float)w, (float)h, &ax, &ay)) {
         ++g_hudPieces;
+        HudDiagPiece("picture", _ReturnAddress(), (float)x, (float)y, (float)w, (float)h, ax, ay, 0);
         float k = g_hudK;
         int nx = HudRound(ax + (x - ax) * k), ny = HudRound(ay + (y - ay) * k);
         int nx1 = HudRound(ax + (x + w - ax) * k), ny1 = HudRound(ay + (y + h - ay) * k);
@@ -4903,7 +4925,7 @@ static int __cdecl HudPic80(int tex, int x, int y, DWORD a, DWORD b)
         __try { ((void (__cdecl*)(int, int*, int*))0x50BEB0)(tex, &w0, &h0); } __except (1) { w0 = h0 = 0; }
         FxBigLog("picture80", tex, x, y, w0, h0, _ReturnAddress());
     }
-    if (g_hudScaling && tex != -1) {
+    if (g_hudScaling && !g_hudInText && tex != -1) {
         int w = 0, h = 0;
         __try { ((void (__cdecl*)(int, int*, int*))0x50BEB0)(tex, &w, &h); } __except (1) { w = h = 0; }
         if (w > 0 && h > 0 && !(w > *(volatile int*)0x913250 * 0.6f || h > *(volatile int*)0x913254 * 0.6f))
@@ -4913,7 +4935,7 @@ static int __cdecl HudPic80(int tex, int x, int y, DWORD a, DWORD b)
 }
 static int __cdecl HudQuad(int tex, float* xs, float* ys, float* us, float* vs, DWORD a, DWORD b)
 {
-    if (g_hudScaling && tex != -1 && xs && ys) {
+    if (g_hudScaling && !g_hudInText && tex != -1 && xs && ys) {
         float x0 = xs[0], x1 = xs[0], y0 = ys[0], y1 = ys[0];
         for (int i = 1; i < 4; ++i) { x0 = min(x0, xs[i]); x1 = max(x1, xs[i]); y0 = min(y0, ys[i]); y1 = max(y1, ys[i]); }
         float ax, ay;
@@ -4935,9 +4957,13 @@ static int __cdecl HudText(int x, int y, const char* text, int font, DWORD sx, D
         float ax, ay;
         if (w > 0 && h > 0 && HudAnchor((float)x, (float)y, (float)w, (float)h, &ax, &ay)) {
             ++g_hudPieces;
+            HudDiagPiece("text", _ReturnAddress(), (float)x, (float)y, (float)w, (float)h, ax, ay, text);
             float k = g_hudK;
-            return ((TextK_t)0x518800)(HudRound(ax + (x - ax) * k), HudRound(ay + (y - ay) * k), FBits(k), FBits(k),
-                                       text, font, sx, sy);
+            g_hudInText = 1;
+            int r = ((TextK_t)0x518800)(HudRound(ax + (x - ax) * k), HudRound(ay + (y - ay) * k), FBits(k), FBits(k),
+                                        text, font, sx, sy);
+            g_hudInText = 0;
+            return r;
         }
     }
     return ((Text_t)0x5186B0)(x, y, text, font, sx, sy);
@@ -4951,7 +4977,10 @@ typedef void (__cdecl* Viewport_t)(int, int, int, int);
 static DWORD g_hudClips = 0;
 static void __cdecl HudViewport(int x, int y, int w, int h)
 {
-    float ax, ay;
+    float ax = -1, ay = -1;
+    int x0 = x, y0 = y, w0 = w, h0 = h;
+    int SW = *(volatile int*)0x913250, SH = *(volatile int*)0x913254;
+    bool small = w > 0 && h > 0 && w <= SW * 0.6f && h <= SH * 0.6f;
     if (g_hudScaling && w > 0 && h > 0 && HudAnchor((float)x, (float)y, (float)w, (float)h, &ax, &ay)) {
         ++g_hudClips;
         float k = g_hudK;
@@ -4961,6 +4990,17 @@ static void __cdecl HudViewport(int x, int y, int w, int h)
         if (w < 1) w = 1; if (h < 1) h = 1;
     }
     ((Viewport_t)0x510870)(x, y, w, h);
+    static DWORD seen[48]; static int seenN = 0;                  // v1.53b: each clip area once (in a level only)
+    DWORD key = (DWORD)(size_t)_ReturnAddress() * 31u + (DWORD)w0 * 13u + (DWORD)h0;   // v1.53c: not x / y (the caption box slides in)
+    bool fresh = true;
+    for (int i = 0; i < seenN; ++i) if (seen[i] == key) { fresh = false; break; }
+    if (small && fresh && g_hudScaling && g_hudDiagLines < kHudDiagMax) {   // v1.53 diag
+        if (seenN < 48) seen[seenN++] = key;
+        ++g_hudDiagLines; g_hudDiagFollow = 16;
+        Log("hud diag clip from %08X%s: %d,%d %dx%d -> %d,%d %dx%d anchor %.0f,%.0f | game stored %d,%d..%d,%d (screen %dx%d k %.2f)",
+            (DWORD)(size_t)_ReturnAddress(), g_hudScaling ? "" : " OUTSIDE the scaled HUD", x0, y0, w0, h0, x, y, w, h, ax, ay,
+            *(volatile int*)0x91325C, *(volatile int*)0x913260, *(volatile int*)0x913270, *(volatile int*)0x913278, SW, SH, g_hudK);
+    }
 }
 static void AchFrame();
 static int __cdecl Hook_HudRender(DWORD player)          // 0x45DA12 -> 0x465530 (the whole HUD)
@@ -4971,7 +5011,7 @@ static int __cdecl Hook_HudRender(DWORD player)          // 0x45DA12 -> 0x465530
     int r = ((int (__cdecl*)(DWORD))0x465530)(player);
     g_hudScaling = 0;
     if (!g_photo) { __try { AchFrame(); } __except (1) {} }   // v0.68: achievements in levels
-    if (k != 1.0f && ++g_hudFrames == 300) Log("hud size: x%.2f, %lu pieces + %lu clip areas scaled in 300 frames, %d groups last frame",
+    if (k != 1.0f && !g_enhOpen && !g_photo && ++g_hudFrames == 300) Log("hud size: x%.2f, %lu pieces + %lu clip areas scaled in 300 frames, %d groups last frame",
                                               k, g_hudPieces, g_hudClips, g_hudGroupN);
     return r;
 }
@@ -6346,10 +6386,12 @@ static void H04Text(int x, int y, const char* s, int font, float hgt, DWORD sx, 
     int ca = (int)((col >> 24) & 0xFF);              // v0.91: the text's OWN alpha (0x91327F) - it fades out on a weapon
     if (ca < a) a = ca;                               // switch; the dark edge used only the HUD alpha and stayed visible
     ((void (__cdecl*)(int, int, int, int))0x510B60)(30, 30, 32, a);
+    g_hudInText = g_hudScaling;                       // v1.53: k already in the text scale - letters not again
     for (int d = 0; d < 4; ++d)
         ((TextK_t)0x518800)(x + (d == 0 ? 1 : d == 1 ? -1 : 0), y + (d == 2 ? 1 : d == 3 ? -1 : 0), FBits(k), FBits(k), s, font, sx, sy);
     *(volatile DWORD*)0x91327C = col;
     ((TextK_t)0x518800)(x, y, FBits(k), FBits(k), s, font, sx, sy);
+    g_hudInText = 0;
 }
 // the ammo text (OnTextDrawn, return address 0x46C5C7): f[15] entity, f[35] weapon type, f[38] pickup-card flag
 static void H04Ammo(DWORD* f)
@@ -9916,7 +9958,7 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
         if (char* s = strrchr(g_dir, '\\')) *s = 0;
         char logPath[MAX_PATH]; snprintf(logPath, sizeof(logPath), "%s\\ExtendedCut.log", g_dir);
         g_log = fopen(logPath, "w");
-        Log("The Punisher: Extended Cut v1.48%s loading (%s)", kBuildKind, g_dir);
+        Log("The Punisher: Extended Cut v1.53%s loading (%s)", kBuildKind, g_dir);
         {   // v0.50.4: hang reporter (needs a real handle of this = the game's main thread)
             HANDLE h = nullptr;
             if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,

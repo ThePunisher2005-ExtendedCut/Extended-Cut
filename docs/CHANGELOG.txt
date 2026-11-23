@@ -1,5 +1,10 @@
 CHANGELOG
 =========
+0.3.2 (hotfix, Nov 22 2026) - plugin v1.53
+- FIX: speaker captions (the yellow boxes) and button prompts (Quick Kill, Grab, Interrogate, Kick door ...) were cut
+  off on big screens (1080p and up, HUD size Auto / above 100 %). The HUD text was enlarged twice - now once, like
+  the boxes and icons, so it fits again. At HUD size above 100 % all HUD text is a bit smaller than in 0.3.0 / 0.3.1.
+
 0.3.1 (hotfix, Nov 22 2026) - plugin v1.48
 - NEW: the Extended Menu works with keyboard and mouse only (no controller needed). F2 on the pause screen opens it
   (or Esc -> Options -> Extended Menu); arrows / W A S D move and change, Enter / Space open sections, Q / E tabs,
