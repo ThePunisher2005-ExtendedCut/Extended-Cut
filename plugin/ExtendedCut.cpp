@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include "ec_image.h"         // v1.58: PNG / resize / DXT5 for the costume library
 
 // ---------------------------------------------------------------- logging
 static char g_dir[MAX_PATH];        // folder of this .asi (ini + log live here)
@@ -3883,7 +3884,7 @@ struct CostumeTex { int w = 0, h = 0, mips = 0; DWORD fmt = 0; std::vector<BYTE>
 static std::vector<std::string> g_costumeNames; static std::vector<unsigned long long> g_fpTee, g_fpCoat;   // v1.23 look-alike fingerprints
 static void CostumeFingerprint(const char* folder, unsigned long long* tee, unsigned long long* coat);          // folders with at least one .dds, sorted
 int g_costumeSel = 0;                                    // 0 = level files (launcher), k = g_costumeNames[k-1]
-static char g_costumeWanted[96] = "";                    // [Costume] Costume = folder name (kept even when missing)
+static char g_costumeWanted[260] = "";                    // [Costume] Costume = folder name (kept even when missing)
 static std::vector<std::pair<std::string, CostumeTex>> g_costumeCache;   // key -> picture of the current choice
 static char __cdecl Upload_Trampoline_Default(int) { return 0; }
 static char (__cdecl* g_origUpload)(int) = Upload_Trampoline_Default;
@@ -3892,6 +3893,15 @@ static char g_costumeTestFrom[48] = "", g_costumeTestTo[32] = "";   // [Develope
 static int g_costumeMaxSize = 4096;
 int g_costumeSkulls = 1;   // v1.19: [Costume] Skulls 1 = the in-game skulls follow the picked costume (its skull01 / skull_orng /
                            // meters_skull .dds), 0 = keep what Apply wrote
+static bool DdsLoad(const char* path, CostumeTex& t); static bool DdsParse(const std::vector<BYTE>& b, const char* path, CostumeTex& t);
+#include "ec_costume_lib.h"   // v1.58: the Costume Launcher's library, read directly
+static std::vector<std::pair<std::string, LibSrc>> g_libNow;   // v1.58: texture sources of the current choice (kit + Mix parts)
+static void MixMoreLabel();   // v1.59
+static bool LibBuildSafe(const std::string& key, const LibSrc& src, CostumeTex& t)
+{
+    __try { return LibBuild(key, src, t); } __except (1) { Log("costume library: making %s crashed", key.c_str()); return false; }
+}
+static void LibRefresh() { g_libNow = LibOn() ? LibResolve(g_costumeSel, true) : std::vector<std::pair<std::string, LibSrc>>(); }
 
 static bool CostumeKey(const char* nm, char* key)          // slot name -> "pun_tshirt_NN" / "punps2_trenchNN", or false
 {
@@ -3911,9 +3921,11 @@ static bool CostumeKey(const char* nm, char* key)          // slot name -> "pun_
     }
     return false;
 }
+static void LibScanNames();   // v1.58
 static void CostumeScan()
 {
     g_costumeNames.clear();
+    if (LibOn()) { LibScanNames(); return; }                 // v1.58: kits from the library
     char pat[MAX_PATH]; snprintf(pat, sizeof(pat), "%s\\Costumes\\*", g_dir);
     WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pat, &fd);
     if (h != INVALID_HANDLE_VALUE) {
@@ -4010,18 +4022,27 @@ static int CostumeStep(int sel, int dir)   // next listed entry (0 = level files
 static int CostumeCount(const char* folder, int* tee, int* coat)   // .dds files of one costume by kind
 {
     *tee = *coat = 0;
+    if (LibOn()) {                                           // v1.58: the current choice's library textures
+        int n = 0; for (auto& e : g_libNow) { ++n; if (!e.first.compare(0, 11, "pun_tshirt_")) ++*tee; else if (!e.first.compare(0, 13, "punps2_trench")) ++*coat; }
+        return n;
+    }
     char p[MAX_PATH]; snprintf(p, sizeof(p), "%s\\Costumes\\%s\\*.dds", g_dir, folder);
     WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(p, &fd); int n = 0;
     if (h == INVALID_HANDLE_VALUE) return 0;
     do { ++n; if (!_strnicmp(fd.cFileName, "pun_tshirt_", 11)) ++*tee; else if (!_strnicmp(fd.cFileName, "punps2_trench", 13)) ++*coat; } while (FindNextFileA(h, &fd));
     FindClose(h); return n;
 }
+static bool DdsParse(const std::vector<BYTE>& b, const char* path, CostumeTex& t);
 static bool DdsLoad(const char* path, CostumeTex& t)
 {
     FILE* f = fopen(path, "rb"); if (!f) return false;
     std::vector<BYTE> b; fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     if (n > 128) { b.resize(n); if (fread(b.data(), 1, n, f) != (size_t)n) b.clear(); }
     fclose(f);
+    return DdsParse(b, path, t);
+}
+static bool DdsParse(const std::vector<BYTE>& b, const char* path, CostumeTex& t)
+{
     if (b.size() < 128 || memcmp(b.data(), "DDS ", 4)) { Log("costume: %s is not a DDS file", path); return false; }
     DWORD h = *(DWORD*)&b[12], w = *(DWORD*)&b[16], mips = *(DWORD*)&b[28], pff = *(DWORD*)&b[80], cc = *(DWORD*)&b[84],
           bits = *(DWORD*)&b[88], rm = *(DWORD*)&b[92], am = *(DWORD*)&b[104];
@@ -4045,12 +4066,51 @@ static bool DdsLoad(const char* path, CostumeTex& t)
     t.w = (int)w; t.h = (int)h; t.mips = (int)keep; t.fmt = fmt; t.data.assign(b.begin() + 128, b.begin() + 128 + need);
     return true;
 }
+static void LibScanNames()   // v1.58: g_costumeNames = the library's kits ("Group / Name"), fingerprints for the look-alike check
+{
+    LibScan();
+    for (auto& k : g_libKits) g_costumeNames.push_back(k.display);
+    g_fpTee.assign(g_costumeNames.size(), 0); g_fpCoat.assign(g_costumeNames.size(), 0);
+    for (size_t i = 0; i < g_libKits.size(); ++i) {
+        unsigned long long ht = 1469598103934665603ULL, hc = ht; int nt = 0, nc = 0;
+        for (auto& e : LibResolve((int)i + 1, false)) {
+            unsigned long long x = LibSrcHash(e.first, e.second);
+            if (!e.first.compare(0, 11, "pun_tshirt_")) { ht = FpMix(ht, &x, sizeof(x)); ++nt; }
+            else if (!e.first.compare(0, 13, "punps2_trench")) { hc = FpMix(hc, &x, sizeof(x)); ++nc; }
+        }
+        g_fpTee[i] = nt ? ht : 0; g_fpCoat[i] = nc ? hc : 0;
+    }
+    g_costumeSel = 0;
+    for (size_t i = 0; i < g_costumeNames.size(); ++i) if (!_stricmp(g_costumeNames[i].c_str(), g_costumeWanted)) g_costumeSel = (int)i + 1;
+    if (!g_costumeSel && g_costumeWanted[0]) {               // an old picker folder name ("MAX - Steve Dillon - MAX") -> its kit
+        for (size_t i = 0; i < g_libKits.size() && !g_costumeSel; ++i) {
+            std::string pn = g_libKits[i].rel; for (size_t p = pn.find('/'); p != std::string::npos; p = pn.find('/', p + 3)) pn.replace(p, 1, " - ");
+            if (!_stricmp(pn.c_str(), g_costumeWanted)) { g_costumeSel = (int)i + 1; Log("costume: old picker name '%s' = kit %s", g_costumeWanted, g_libKits[i].display.c_str()); }
+        }
+    }
+    for (int i = 0; i < kMixMax; ++i) {
+        if (i < (int)g_libParts.size()) snprintf(g_mixLabel[i], sizeof(g_mixLabel[i]), "%s%s", g_libParts[i].minor ? "   " : "", g_libParts[i].label.c_str());
+        else g_mixLabel[i][0] = 0;
+    }
+    MixMoreLabel();   // v1.59
+    LibRefresh();
+    Log("costume: library %s - %d kit(s), picked: %s", g_libDir.c_str(), (int)g_costumeNames.size(),
+        g_costumeSel ? g_costumeNames[g_costumeSel - 1].c_str() : (g_costumeWanted[0] ? "level files (the picked kit is missing)" : "level files"));
+}
 static CostumeTex* CostumeFor(const char* key)
 {
     if (g_costumeSel <= 0 || g_costumeSel > (int)g_costumeNames.size()) return nullptr;
     for (auto& e : g_costumeCache) if (e.first == key) return e.second.ok ? &e.second : nullptr;
     g_costumeCache.push_back({ key, CostumeTex() });
     CostumeTex& t = g_costumeCache.back().second; t.tried = true;
+    if (LibOn()) {                                           // v1.58: made from the library (cached in CostumeCache\)
+        for (auto& e : g_libNow) if (e.first == key) {
+            t.ok = LibBuildSafe(e.first, e.second, t);
+            if (!t.ok) Log("costume library: %s could not be made - level texture kept", key);
+            break;
+        }
+        return t.ok ? &t : nullptr;
+    }
     char p[MAX_PATH]; snprintf(p, sizeof(p), "%s\\Costumes\\%s\\%s.dds", g_dir, g_costumeNames[g_costumeSel - 1].c_str(), key);
     if (GetFileAttributesA(p) == INVALID_FILE_ATTRIBUTES) return nullptr;
     t.ok = DdsLoad(p, t);
@@ -4123,17 +4183,53 @@ static int CostumeReuploadAll()   // MAIN THREAD: every slot with a costume name
     return n;
 }
 static void SkullEffectsTick(bool now);   // v1.19
+// v1.58: Mix parts picks by NAME (part folder = style, skull file, shirt background file) - kept in the ini and across a
+// "Reload costume files" (the library can change while the game runs)
+static std::string MixNames(std::string* skull, std::string* shirt)
+{
+    std::string parts;
+    for (int i = 0; i < kMixMax && i < (int)g_libParts.size(); ++i)
+        if (g_mixSel[i] > 0)
+            parts += (parts.empty() ? "" : "|") + g_libParts[i].folder + "=" + (g_mixSel[i] <= (int)g_libParts[i].styles.size() ? g_libParts[i].styles[g_mixSel[i] - 1] : std::string("<none>"));
+    *skull = g_mixSkull == 0 ? "" : g_mixSkull > (int)g_libSkulls.size() ? "<none>" : g_libSkulls[g_mixSkull - 1];
+    *shirt = g_mixShirt > 0 && g_mixShirt <= (int)g_libShirts.size() ? g_libShirts[g_mixShirt - 1] : "";
+    return parts;
+}
+static void MixFromNames(const std::string& parts, const std::string& skull, const std::string& shirt)
+{
+    MixReset();
+    size_t i = 0;
+    while (i < parts.size()) {
+        size_t bar = parts.find('|', i); std::string one = parts.substr(i, bar == std::string::npos ? std::string::npos : bar - i);
+        size_t eq = one.find('=');
+        if (eq != std::string::npos) {
+            int pi = LibPartIndex(one.substr(0, eq));
+            if (pi >= 0 && pi < kMixMax) {
+                std::string v = one.substr(eq + 1);
+                if (v == "<none>") g_mixSel[pi] = (int)g_libParts[pi].styles.size() + 1;
+                else { int st = LibStyleIndex(g_libParts[pi], v); if (st >= 0) g_mixSel[pi] = st + 1; }
+            }
+        }
+        if (bar == std::string::npos) break; i = bar + 1;
+    }
+    if (skull == "<none>") g_mixSkull = (int)g_libSkulls.size() + 1;
+    else for (size_t k = 0; k < g_libSkulls.size(); ++k) if (!_stricmp(g_libSkulls[k].c_str(), skull.c_str())) g_mixSkull = (int)k + 1;
+    for (size_t k = 0; k < g_libShirts.size(); ++k) if (!_stricmp(g_libShirts[k].c_str(), shirt.c_str())) g_mixShirt = (int)k + 1;
+}
 static void CostumeChanged(bool rescan)   // menu: a new choice / reload files
 {
     if (rescan) {
         std::string keep = g_costumeSel > 0 && g_costumeSel <= (int)g_costumeNames.size() ? g_costumeNames[g_costumeSel - 1] : "";
         if (!keep.empty()) strncpy(g_costumeWanted, keep.c_str(), sizeof(g_costumeWanted) - 1);
+        std::string sk, sh, parts = LibOn() ? MixNames(&sk, &sh) : std::string();
         CostumeScan();
+        if (LibOn()) { MixFromNames(parts, sk, sh); LibRefresh(); }
     } else {
         if (g_costumeSel > 0 && g_costumeSel <= (int)g_costumeNames.size()) strncpy(g_costumeWanted, g_costumeNames[g_costumeSel - 1].c_str(), sizeof(g_costumeWanted) - 1);
         else g_costumeWanted[0] = 0;
     }
     g_costumeCache.clear();
+    LibRefresh();                                          // v1.58
     if (!g_costumeHooked) return;
     int n = CostumeReuploadAll();
     Log("costume: now %s - %d texture(s) re-uploaded", g_costumeSel ? g_costumeNames[g_costumeSel - 1].c_str() : "level files", n);
@@ -4221,7 +4317,21 @@ static void InstallCostumeLoader(const char* ini)
       for (char* c = kb; *c; ++c) if (*c == ';' || *c == ' ') { *c = 0; break; }
       Target t = ParseTarget(kb); g_costumeKeyVk = t.kind == T_KEY ? t.value : 0;
       if (g_costumeKeyVk) Log("costume: key %s steps to the next costume", kb); }
+    {   // v1.58: the Costume Launcher's library, read directly (else the old Costumes\ folders)
+        std::string how; g_libDir = LibLocate(ini, &how);
+        g_libSmoothDarks = GetPrivateProfileIntA("Costume", "SmoothDarks", 1, ini) ? 1 : 0;
+        if (LibOn()) Log("costume library: %s (found via %s)", g_libDir.c_str(), how.c_str());
+        else Log("costume library: not found (set [Costume] Library= in the ini) - using the Costumes folder");
+    }
     CostumeScan();
+    if (LibOn()) {
+        char mp[1024] = "", ms[260] = "", mh[260] = "";
+        GetPrivateProfileStringA("Costume", "MixParts", "", mp, sizeof(mp), ini);
+        GetPrivateProfileStringA("Costume", "MixSkull", "", ms, sizeof(ms), ini);
+        GetPrivateProfileStringA("Costume", "MixShirt", "", mh, sizeof(mh), ini);
+        MixFromNames(mp, ms, mh); LibRefresh();
+        if (MixChanged()) Log("costume: Mix parts - %d change(s) on top of the kit", MixChanged());
+    }
     static const BYTE pro[11] = { 0x83, 0xEC, 0x34, 0x53, 0x8B, 0x5C, 0x24, 0x3C, 0x55, 0x56, 0x57 };
     if (memcmp((void*)0x519500, pro, 11)) { Log("costume: texture upload 0x519500 not as expected (another mod?) - costume loader off"); return; }
     BYTE* tr = (BYTE*)VirtualAlloc(nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -5074,6 +5184,26 @@ static void __cdecl HudViewport(int x, int y, int w, int h)
         x = nx; y = ny; w = nx1 - nx; h = ny1 - ny;
         if (w < 1) w = 1; if (h < 1) h = 1;
     }
+    // v1.60 (tester 1080p, HUD 150 %: "health low at the start"): the health bar fill 0x46A4D0 is cut by a full-HEIGHT
+    // strip (0,0 169x1080 = bar right end at full health). Too tall for HudAnchor, so it stayed native while the bar
+    // grew 1.5x -> only half the bar showed (k 1.8: a third). A strip = scale only its narrow side, anchored by screen
+    // thirds like the pieces in it (bar: left third -> 0).
+    else if (g_hudScaling && w > 0 && h > 0 && SW >= 16 && SH >= 16) {
+        float k = g_hudK;
+        bool narrowX = w <= SW * 0.6f, narrowY = h <= SH * 0.6f;
+        if (narrowX != narrowY) {
+            ++g_hudClips;
+            if (narrowX) {
+                float cx = x + w * 0.5f, sx = cx < SW / 3.0f ? 0.0f : cx > SW * 2 / 3.0f ? (float)SW : SW * 0.5f;
+                int nx = HudRound(sx + (x - sx) * k), nx1 = HudRound(sx + (x + w - sx) * k);
+                x = nx; w = nx1 - nx; if (w < 1) w = 1;
+            } else {
+                float cy = y + h * 0.5f, sy = cy < SH / 3.0f ? 0.0f : cy > SH * 2 / 3.0f ? (float)SH : SH * 0.5f;
+                int ny = HudRound(sy + (y - sy) * k), ny1 = HudRound(sy + (y + h - sy) * k);
+                y = ny; h = ny1 - ny; if (h < 1) h = 1;
+            }
+        }
+    }
     ((Viewport_t)0x510870)(x, y, w, h);
     g_hudLocal = (g_hudScaling && ax >= 0 && (x0 != 0 || y0 != 0)) ? 1 : 0;   // v1.56b: pieces after this are local
     static DWORD seen[48]; static int seenN = 0;                  // v1.53b: each clip area once (in a level only)
@@ -5161,14 +5291,22 @@ static void DrawChoiceStick(int cx, int cy)
     if (!looked[set]) {
         looked[set] = true;
         int found = 0;
+        // v1.60 (tester, PlayStation prompts, release 0.3.4): the release mini.vpp has no _p set (PS2-disc pictures), but
+        // 0x50C750 returns a handle for a MISSING name too (a new blank 32x32 grey placeholder each time; PC test:
+        // "ec_nopic.tga" -> 32x32) -> "5 of 5 found" and a grey square in the middle of the choice wheel that never
+        // showed the direction. The stick pictures are 64x64: anything else = missing. (Names max 23 characters: a
+        // longer one overruns the game's buffer and crashes it.)
         for (int i = 0; i < 5; ++i) {
             char nm[40]; const char* base = kStickTex[i];
             size_t n = strlen(base) - 4;                                      // without ".tga"
             snprintf(nm, sizeof(nm), "%.*s%s.tga", (int)n, base, kSets[set]);
-            int h = -1;
+            int h = -1, tw = 0, th = 0;
             __try { h = ((int (__cdecl*)(const char*, int))0x50C750)(nm, -1); } __except (1) { h = -1; }
+            if (h >= 0) { __try { ((void (__cdecl*)(int, int*, int*))0x50BEB0)(h, &tw, &th); } __except (1) { tw = th = 0; } }
+            if (tw != 64 || th != 64) h = -1;
             styled[set][i] = h; if (h >= 0) ++found;
         }
+        if (found < 5) for (int i = 0; i < 5; ++i) styled[set][i] = -1;   // a whole set or none (no mixed sticks)
         Log("stick pictures (%s): %d of 5 found%s", kSets[set], found, found == 5 ? "" : " - using the HUD's own picture");
     }
     int tex = styled[set][idx] >= 0 ? styled[set][idx] : *(volatile int*)(kStickHandles + idx * 4);
@@ -7724,6 +7862,59 @@ static void LoadPosition()
 // The rest (E / C / P / H / X, comic covers) is "not tracked yet".
 #include "achievements_table.h"
 static void EnhStatus(const char* s);
+static void EnhMarkDirty();   // v1.58
+// v1.58: "Save as new kit" - the picked kit + the Mix parts picks -> Kits\Made in game\My kit N.json (the launcher's kit
+// format: parts / skull / shirt / fit). The launcher sees it too. The new kit is picked right away, Mix parts cleared.
+static std::string g_libSavedName;
+static void LibSaveKitAction()
+{
+    const LibKit* k = LibKitOf(g_costumeSel);
+    if (!k) { EnhStatus("Pick a kit first"); return; }
+    std::string dir = LibJoin(g_libDir, "Kits\\Made in game");
+    CreateDirectoryW(LibW(dir).c_str(), nullptr);
+    std::string name; char nb[32];
+    for (int n = 1; n < 1000; ++n) { snprintf(nb, sizeof(nb), "My kit %d", n); if (!LibIsFile(LibJoin(dir, std::string(nb) + ".json"))) { name = nb; break; } }
+    if (name.empty()) { EnhStatus("Too many kits in Made in game"); return; }
+    std::string js = "{\n \"parts\": {";
+    bool first = true;
+    for (size_t pi = 0; pi < g_libParts.size(); ++pi) {
+        const LibPart& p = g_libParts[pi]; std::string style;
+        if (pi < (size_t)kMixMax && g_mixSel[pi] > (int)p.styles.size()) continue;            // None
+        if (pi < (size_t)kMixMax && g_mixSel[pi] > 0 && g_mixSel[pi] <= (int)p.styles.size()) style = p.styles[g_mixSel[pi] - 1];
+        else for (auto& kp : k->parts) if (!_stricmp(kp.first.c_str(), p.folder.c_str())) style = kp.second;
+        if (style.empty()) continue;
+        js += std::string(first ? "\n" : ",\n") + "  " + JsonQ(p.folder) + ": " + JsonQ(style); first = false;
+    }
+    js += "\n }";
+    double fit[8]; std::string skull = LibSkullNow(*k, fit), shirt = LibShirtNow(*k);
+    if (!skull.empty()) js += ",\n \"skull\": " + JsonQ(skull.substr(skull.rfind('\\') + 1));
+    if (!shirt.empty()) js += ",\n \"shirt\": " + JsonQ(shirt.substr(shirt.rfind('\\') + 1));
+    js += ",\n \"fit\": {";
+    for (int i = 0; i < 8; ++i) {
+        char v[64];
+        if (i == 5) snprintf(v, sizeof(v), ",\n  \"extend\": %s", fit[i] != 0 ? "true" : "false");
+        else snprintf(v, sizeof(v), "%s\n  \"%s\": %g", i ? "," : "", kFitKeys[i], fit[i]);
+        js += v;
+    }
+    js += "\n },\n \"made_in_game\": true\n}\n";
+    std::string path = LibJoin(dir, name + ".json");
+    if (!LibWrite(path, js.data(), js.size())) { EnhStatus("Could not save the kit (library folder read-only?)"); Log("costume: could not write %s", path.c_str()); return; }
+    Log("costume: saved %s (kit %s + %d Mix parts change(s))", path.c_str(), k->display.c_str(), MixChanged());
+    snprintf(g_costumeWanted, sizeof(g_costumeWanted), "Made in game / %s", name.c_str());
+    MixReset(); g_costumeSel = 0; CostumeChanged(true);     // rescan picks the new kit by name (sel 0: the wanted name stays)
+    g_libSavedName = name; EnhMarkDirty();                 // the new kit is written to the ini on close
+    char m[96]; snprintf(m, sizeof(m), "Saved as  Made in game / %s", name.c_str()); EnhStatus(m);
+}
+// v1.59: "More parts" fold inside Mix parts (teeth, hair, strap, holsters - user: they hardly change)
+static int  g_mixMoreOpen = 0;
+static char g_mixMoreLabel[48] = "+ More parts";
+static void MixMoreLabel()
+{
+    int c = 0; for (auto& p : g_libParts) if (p.minor) ++c;
+    if (g_mixMoreOpen) snprintf(g_mixMoreLabel, sizeof(g_mixMoreLabel), "- More parts");
+    else snprintf(g_mixMoreLabel, sizeof(g_mixMoreLabel), "+ More parts (%d)", c);
+}
+static void MixMoreAction() { g_mixMoreOpen = !g_mixMoreOpen; MixMoreLabel(); EnhMarkDirty(); }
 static void AchRefreshRows();
 static bool g_achGot[kAchCount];
 static bool g_achLoaded = false, g_achFirstRun = false;
@@ -8049,9 +8240,30 @@ static const EnhItem kEnh[] = {
     { 4, "Gun tension camera",    EK_INT,   &g_gunCam, 0, 3, 1, 0, "Settings", "GunInterrogationCamera", "Retail / over-the-shoulder + front / Beta (the PS2-demo original) + front / Beta only. From the next gun interrogation" },   // v1.08: moved from Gameplay (user)
     { 6, "Punisher's costume", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },
     { 6, "Outfit",                EK_INT, &g_outfit, 0, 2, 1, 0, "Costume", "Outfit", "Level's own = what each level gives him. Trench coat / T-shirt = that outfit in every level (cutscenes keep the level's own). From the next level or checkpoint load" },
-    { 6, "Costume",               EK_INT, &g_costumeSel, 0, 0, 1, 0, nullptr, nullptr, "Your costumes from the folder scripts > Extended Cut > Costumes (Costume Launcher: Send to in-game picker), incl. the PC Exclusive skins 1980 / 1990 / 2000 (launcher: Send whole library to the game). Level files = what the level files carry (the launcher's Apply). Changes at once, in any level" },
+    { 6, "Costume",               EK_INT, &g_costumeSel, 0, 0, 1, 0, nullptr, nullptr, "Every kit in your Costume Library (Group / Name). Left / right = next kit - he changes RIGHT AWAY. The first use of a picture converts it once (about a second), then it loads from the cache. Level files = what the level files carry" },
     { 6, "In-game skulls",        EK_INT, &g_costumeSkulls, 0, 1, 1, 0, "Costume", "Skulls", "Follow costume = the skulls on the HUD, over enemies, at hotspots and in the menus change with the picked costume (when its folder has skulls; Costume Launcher 0.9.26+). Keep Apply's = the skulls the launcher's Apply wrote. Changes at once" },
-    { 6, "Reload costume files",  EK_ACTION, (void*)CostumeReloadAction, 0, 0, 0, 0, nullptr, nullptr, "Reads the Costumes folder again (new or edited costumes) and shows the picked one at once" },
+    { 6, "Reload costume files",  EK_ACTION, (void*)CostumeReloadAction, 0, 0, 0, 0, nullptr, nullptr, "Reads your Costume Library again (kits, parts, skulls you added or changed in the launcher) and shows the picked kit at once" },
+    { 6, "Mix parts", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },   // v1.58: changes on top of the picked kit
+    { 6, "Skull",                 EK_INT, &g_mixSkull, 0, 0, 1, 0, nullptr, nullptr, "The skull on the skull shirt (Shirt Front = None). Any skull in your Costume Library > Skulls. * = changed from the kit. No skull = the plain shirt background. Also the in-game skulls when they follow the costume. Fine-tune the fit in the launcher" },
+    { 6, "Shirt background",      EK_INT, &g_mixShirt, 0, 0, 1, 0, nullptr, nullptr, "The shirt under the skull (Costume Library > Shirt Backgrounds), for the skull shirt (Shirt Front = None). * = changed from the kit" },
+    { 6, g_mixLabel[0],  EK_INT, &g_mixSel[0],  0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[1],  EK_INT, &g_mixSel[1],  0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[2],  EK_INT, &g_mixSel[2],  0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[3],  EK_INT, &g_mixSel[3],  0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[4],  EK_INT, &g_mixSel[4],  0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[5],  EK_INT, &g_mixSel[5],  0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[6],  EK_INT, &g_mixSel[6],  0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[7],  EK_INT, &g_mixSel[7],  0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[8],  EK_INT, &g_mixSel[8],  0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[9],  EK_INT, &g_mixSel[9],  0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[10], EK_INT, &g_mixSel[10], 0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[11], EK_INT, &g_mixSel[11], 0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[12], EK_INT, &g_mixSel[12], 0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[13], EK_INT, &g_mixSel[13], 0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[14], EK_INT, &g_mixSel[14], 0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixLabel[15], EK_INT, &g_mixSel[15], 0, 0, 1, 0, nullptr, nullptr, "One part of the costume (Costume Library > Parts). Left / right = the other styles in that folder. * = changed from the kit (X = back to the kit's). Every part shows in every level: set the T-shirt and the coat parts once, the kit is ready for both. Shirt Front None = the skull shirt (Skull + Shirt background)" },
+    { 6, g_mixMoreLabel,        EK_ACTION, (void*)MixMoreAction, 0, 0, 0, 0, nullptr, nullptr, "A: show / hide the parts that hardly change (teeth, hair, strap, holsters)" },   // v1.59
+    { 6, "Save as new kit",       EK_ACTION, (void*)LibSaveKitAction, 0, 0, 0, 0, nullptr, nullptr, "Saves the kit + your Mix parts changes as a new kit (Costume Library > Kits > Made in game > My kit N). The launcher sees it too. It is picked right away" },
     { 6, "Weapon Skin", EK_HEADER, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr },   // v1.46 (user): from Gameplay
     { 6, "Colt .45",              EK_INT, &g_blackColt, 0, 1, 1, 0, "Weapons", "BlackColt", "The Punisher's own Colt .45s (one or two, HUD and pickup picture too); enemies keep the game's Colt. Original = the game's silver Colt. 04 Movie = black with silver details and the gold medallion. Works right away" },
     { 7, "Achievements",          EK_TOGGLE, &g_achOn, 0, 1, 1, 0, "Achievements", "Enabled", "On = unlock achievements while you play (pop-up + this page). Your game save is not changed" },
@@ -8114,21 +8326,73 @@ static int   EnhHeaderOf(int i)
     for (int j = i; j >= 0 && kEnh[j].page == kEnh[i].page; --j) if (kEnh[j].kind == EK_HEADER) return j;
     return -1;
 }
+// v1.58: rows that depend on the costume library (Mix parts: only with a library + a picked kit; a part row only when
+// that part dresses the outfit he wears now, and only as many rows as the library has part folders)
+static bool MixPartCoversFront(int outfit)   // a picked part writes texture 04 for this outfit (2 T-shirt, 3 coat)
+{
+    for (auto& e : g_libNow) if (e.first == (outfit == 3 ? "punps2_trench04" : "pun_tshirt_04")) return e.second.type == SRC_FILE && e.second.a.find("\\Parts\\") != std::string::npos;
+    return false;
+}
+static bool  MixIsPartRow(const EnhItem& it) { return it.ptr >= (void*)&g_mixSel[0] && it.ptr < (void*)&g_mixSel[kMixMax]; }
+static int   MixFrontPart()   // v1.59: the Shirt Front part row (texture 04 only), -1 = none
+{
+    for (size_t j = 0; j < g_libParts.size() && j < (size_t)kMixMax; ++j)
+        if (g_libParts[j].slots.size() == 1 && g_libParts[j].slots[0].second == 4) return (int)j;
+    return -1;
+}
+static bool  EnhRowShown(int i)
+{
+    const EnhItem& it = kEnh[i];
+    bool mixHeader = it.kind == EK_HEADER && !strcmp(it.label, "Mix parts");
+    bool mixRow = it.ptr == &g_mixSkull || it.ptr == &g_mixShirt || it.ptr == (void*)LibSaveKitAction || it.ptr == (void*)MixMoreAction || MixIsPartRow(it);
+    if (!mixHeader && !mixRow) return true;
+    if (!LibOn() || g_costumeSel <= 0) return false;
+    if (MixIsPartRow(it)) {                         // v1.59: every part in every level (user: kits are set up for both outfits)
+        int j = (int)((int*)it.ptr - g_mixSel);
+        if (j >= (int)g_libParts.size()) return false;
+        return !g_libParts[j].minor || g_mixMoreOpen;
+    }
+    if (it.ptr == (void*)MixMoreAction) { for (auto& p : g_libParts) if (p.minor) return true; return false; }
+    if (it.ptr == &g_mixSkull || it.ptr == &g_mixShirt)   // v1.59: only while a skull shirt is used (Shirt Front None / no front part)
+        return !MixPartCoversFront(2) || !MixPartCoversFront(3);
+    return true;
+}
 static int   EnhVisible(int page, int* out)
 {
     int n = 0;
+    // v1.59: Mix parts rows in the author's order - Skull + Shirt background right under Shirt Front, "More parts" before the
+    // first minor part (they sit elsewhere in kEnh; emitted inline here)
+    int front = MixFrontPart(), iSkull = -1, iShirt = -1, iMore = -1, firstMinor = -1;
     for (int i = 0; i < kEnhCount; ++i) {
-        if (kEnh[i].page != page) continue;
-        if (kEnh[i].kind == EK_HEADER) { out[n++] = i; continue; }
+        if (kEnh[i].ptr == &g_mixSkull) iSkull = i; else if (kEnh[i].ptr == &g_mixShirt) iShirt = i;
+        else if (kEnh[i].ptr == (void*)MixMoreAction) iMore = i;
+    }
+    for (size_t j = 0; j < g_libParts.size() && j < (size_t)kMixMax; ++j) if (g_libParts[j].minor) { firstMinor = (int)j; break; }
+    auto add = [&](int i) {
+        if (!EnhRowShown(i)) return;
+        if (kEnh[i].kind == EK_HEADER) { out[n++] = i; return; }
         int h = EnhHeaderOf(i);
         if (h < 0 || g_secOpen[h]) out[n++] = i;
+    };
+    for (int i = 0; i < kEnhCount; ++i) {
+        if (kEnh[i].page != page) continue;
+        if (front >= 0 && (i == iSkull || i == iShirt)) continue;
+        if (firstMinor >= 0 && i == iMore) continue;
+        if (MixIsPartRow(kEnh[i])) {
+            int j = (int)((int*)kEnh[i].ptr - g_mixSel);
+            if (j == firstMinor && iMore >= 0) add(iMore);
+            add(i);
+            if (j == front) { if (iSkull >= 0) add(iSkull); if (iShirt >= 0) add(iShirt); }
+            continue;
+        }
+        add(i);
     }
     return n;
 }
 static int   EnhSectionSize(int h)          // settings under header h
 {
     int c = 0;
-    for (int i = h + 1; i < kEnhCount && kEnh[i].page == kEnh[h].page && kEnh[i].kind != EK_HEADER; ++i) ++c;
+    for (int i = h + 1; i < kEnhCount && kEnh[i].page == kEnh[h].page && kEnh[i].kind != EK_HEADER; ++i) if (EnhRowShown(i)) ++c;   // v1.58: shown rows only
     return c;
 }
 static void  EnhStateLoad()
@@ -8137,7 +8401,7 @@ static void  EnhStateLoad()
     char buf[128];
     int last = -1;                                  // default: the first section of each tab open, the rest closed
     for (int i = 0; i < kEnhCount; ++i) if (kEnh[i].kind == EK_HEADER) { g_secOpen[i] = kEnh[i].page != last; last = kEnh[i].page; }
-    GetPrivateProfileStringA("Enhancements", "MenuSections2", "", buf, sizeof(buf), ini);   // v1.46: MenuSections2 (headers moved: Weapon Skin); v1.16: new key (the Costume tab moved headers; the old OpenSections order is ignored once)
+    GetPrivateProfileStringA("Enhancements", "MenuSections3", "", buf, sizeof(buf), ini);   // v1.46: MenuSections2 (headers moved: Weapon Skin); v1.16: new key (the Costume tab moved headers; the old OpenSections order is ignored once)
     if (buf[0]) {                                   // one 0 / 1 per header, in table order
         int k = 0;
         for (int i = 0; i < kEnhCount; ++i) if (kEnh[i].kind == EK_HEADER) {
@@ -8145,6 +8409,7 @@ static void  EnhStateLoad()
             if (buf[k]) ++k;
         }
     }
+    g_mixMoreOpen = GetPrivateProfileIntA("Enhancements", "MixMoreParts", 0, ini) ? 1 : 0; MixMoreLabel();   // v1.59
     g_enhPage = GetPrivateProfileIntA("Enhancements", "MenuTab", 0, ini);
     if (!EnhPageShown(g_enhPage)) g_enhPage = 0;
     int item = GetPrivateProfileIntA("Enhancements", "MenuRow", -1, ini);
@@ -8163,9 +8428,10 @@ static void  EnhStateSave()
     char buf[128]; int k = 0;
     for (int i = 0; i < kEnhCount && k < 120; ++i) if (kEnh[i].kind == EK_HEADER) buf[k++] = g_secOpen[i] ? '1' : '0';
     buf[k] = 0;
-    WritePrivateProfileStringA("Enhancements", "MenuSections2", buf, ini);
+    WritePrivateProfileStringA("Enhancements", "MenuSections3", buf, ini);   // v1.58: + Mix parts header
     char v[16]; snprintf(v, sizeof(v), "%d", g_enhPage);
     WritePrivateProfileStringA("Enhancements", "MenuTab", v, ini);
+    WritePrivateProfileStringA("Enhancements", "MixMoreParts", g_mixMoreOpen ? "1" : "0", ini);   // v1.59
     static int vis[kEnhCount];
     int n = EnhVisible(g_enhPage, vis);
     snprintf(v, sizeof(v), "%d", (g_enhSel >= 0 && g_enhSel < n) ? vis[g_enhSel] : -1);
@@ -8188,6 +8454,7 @@ static const char* EnhNeeds(const EnhItem& it)    // a row whose file is missing
     return nullptr;
 }
 static bool  g_enhDirty = false;
+static void EnhMarkDirty() { g_enhDirty = true; }
 static char  g_enhStatus[96] = "";
 static DWORD g_enhStatusAt = 0;
 static bool  g_enhBackupDone = false;
@@ -8302,6 +8569,27 @@ static void EnhValueText(const EnhItem& it, char* out, size_t n)
         if (it.ptr == &g_costumeSkulls) {   // v1.19
             snprintf(out, n, "%s", *(int*)it.ptr ? "Follow costume" : "Keep Apply's"); break;
         }
+        if (it.ptr == &g_mixSkull || it.ptr == &g_mixShirt || (it.ptr >= (void*)&g_mixSel[0] && it.ptr < (void*)&g_mixSel[kMixMax])) {   // v1.58
+            // v1.59: just the name; " *" = changed from the kit (user: "Kit's (..)" took too much room)
+            const LibKit* k = LibKitOf(g_costumeSel); int v = *(int*)it.ptr; std::string kit, now;
+            if (it.ptr == &g_mixSkull) {
+                kit = k && !k->skull.empty() ? LibStem(k->skull) : "No skull";
+                now = v > (int)g_libSkulls.size() ? "No skull" : v > 0 ? LibStem(g_libSkulls[v - 1]) : "";
+            } else if (it.ptr == &g_mixShirt) {
+                kit = k && !k->shirt.empty() ? LibStem(k->shirt) : !g_libShirts.empty() ? LibStem(g_libShirts[0]) : "Plain";
+                now = v > 0 && v <= (int)g_libShirts.size() ? LibStem(g_libShirts[v - 1]) : "";
+            } else {
+                int j = (int)((int*)it.ptr - g_mixSel);
+                if (j < (int)g_libParts.size()) {
+                    const LibPart& p = g_libParts[j];
+                    const char* none = p.slots.size() == 1 && p.slots[0].second == 4 ? "Skull shirt" : "Game's own";
+                    kit = none; if (k) for (auto& kp : k->parts) if (!_stricmp(kp.first.c_str(), p.folder.c_str())) kit = kp.second;
+                    now = v > (int)p.styles.size() ? none : v > 0 ? p.styles[v - 1] : "";
+                }
+            }
+            if (v == 0 || now.empty()) snprintf(out, n, "%s", kit.c_str()); else snprintf(out, n, "%s *", now.c_str());
+            break;
+        }
         if (it.ptr == &g_outfit) {   // v1.10
             static const char* w[3] = { "Level's own", "Trench coat", "T-shirt" };
             int x = *(int*)it.ptr; snprintf(out, n, "%s", (x >= 0 && x <= 2) ? w[x] : "?"); break;
@@ -8383,8 +8671,20 @@ static void EnhChange(const EnhItem& it, int dir, int mult = 1)   // dir -1 / +1
         if (nv != *v) { *v = nv; g_enhDirty = true; }
     } break;
     case EK_INT: {
+        if (it.ptr == &g_mixSkull || it.ptr == &g_mixShirt || (it.ptr >= (void*)&g_mixSel[0] && it.ptr < (void*)&g_mixSel[kMixMax])) {   // v1.58
+            int cnt = it.ptr == &g_mixSkull ? (int)g_libSkulls.size() + 2 : it.ptr == &g_mixShirt ? (int)g_libShirts.size() + 1
+                    : ((int*)it.ptr - g_mixSel) < (int)g_libParts.size() ? (int)g_libParts[(int*)it.ptr - g_mixSel].styles.size() + 2 : 1;   // + "None"
+            int* v = (int*)it.ptr; *v = ((*v + dir) % cnt + cnt) % cnt;
+            DWORD t0 = GetTickCount();
+            CostumeChanged(false); g_enhDirty = true;
+            char m[96], val[64]; EnhValueText(it, val, sizeof(val));
+            snprintf(m, sizeof(m), "%s: %s%s", it.label, val, GetTickCount() - t0 > 300 ? "  (new pictures converted)" : "");
+            EnhStatus(m);
+            break;
+        }
         if (it.ptr == &g_costumeSel) {   // v1.12: wraps round, applies at once
             g_costumeSel = CostumeStep(g_costumeSel, dir);           // v1.23: look-alikes for the current outfit once
+            MixReset();                                              // v1.58: Mix parts start fresh on another kit
             CostumeChanged(false); g_enhDirty = true;
             int tee = 0, coat = 0;
             char m[128];
@@ -8425,7 +8725,8 @@ static void EnhChange(const EnhItem& it, int dir, int mult = 1)   // dir -1 / +1
             char s[48];                                 // v0.50.1: each action its own message
             if (it.ptr == (void*)SavePosition) snprintf(s, sizeof(s), "Position saved");
             else if (it.ptr == (void*)LoadPosition) snprintf(s, sizeof(s), g_tpHave ? "Moved to the saved position" : "No position saved yet");
-            else if (it.ptr == (void*)CostumeReloadAction) snprintf(s, sizeof(s), "%d costume(s) found", (int)g_costumeNames.size());
+            else if (it.ptr == (void*)CostumeReloadAction) snprintf(s, sizeof(s), LibOn() ? "%d kit(s) found" : "%d costume(s) found", (int)g_costumeNames.size());
+            else if (it.ptr == (void*)LibSaveKitAction) snprintf(s, sizeof(s), "%s", g_enhStatus);
             else if (it.ptr == (void*)LogPlayerPosition) snprintf(s, sizeof(s), "Position #%d written to the log", g_posLogCount);
             else s[0] = 0;
             if (s[0]) EnhStatus(s);
@@ -8546,6 +8847,10 @@ static bool EnhSave()
         t.Set(it.section, it.key, v);
     }
     t.Set("Costume", "Costume", g_costumeWanted);   // v1.12: by name (folders come and go)
+    if (LibOn()) {                                   // v1.58: Mix parts by name
+        std::string sk, sh, parts = MixNames(&sk, &sh);
+        t.Set("Costume", "MixParts", parts.c_str()); t.Set("Costume", "MixSkull", sk.c_str()); t.Set("Costume", "MixShirt", sh.c_str());
+    }
     bool ok = t.Save(ini);
     Log("enhancements: settings %s ExtendedCut.ini", ok ? "saved to" : "could NOT be saved to");
     ResolutionSave();   // v0.42
@@ -10094,7 +10399,7 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID)
         if (char* s = strrchr(g_dir, '\\')) *s = 0;
         char logPath[MAX_PATH]; snprintf(logPath, sizeof(logPath), "%s\\ExtendedCut.log", g_dir);
         g_log = fopen(logPath, "w");
-        Log("The Punisher: Extended Cut v1.57%s loading (%s)", kBuildKind, g_dir);
+        Log("The Punisher: Extended Cut v1.60%s loading (%s)", kBuildKind, g_dir);
         {   // v0.50.4: hang reporter (needs a real handle of this = the game's main thread)
             HANDLE h = nullptr;
             if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,

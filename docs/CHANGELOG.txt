@@ -1,5 +1,14 @@
 CHANGELOG
 =========
+0.3.5 (Nov 23 2026) - plugin v1.60
+- FIX: button prompt issues. With PlayStation button prompts the interrogation choice wheel showed a plain grey
+  square in the middle instead of the stick picture, so you could not see which way you were pushing. The
+  PlayStation stick pictures are now included (installer part "pictures"), and a missing stick picture falls
+  back to the game's own one instead of the grey square.
+- FIX (HUD size above 100 %): the health bar looked low at full health (about half full at 150 %). The bar grew
+  with the HUD but the area that shows its red fill did not.
+- Costume tab: the game reads your Costume Launcher library itself (kits, Mix parts, Save as new kit).
+
 0.3.4 (hotfix, Nov 23 2026) - plugin v1.57
 - FIX: D-pad Left (Holster) did nothing on a normal install. The retail PC game has NO key for Holster, so the
   controller's holster button only worked after binding Holster in the game's own Controls menu. The plugin now
