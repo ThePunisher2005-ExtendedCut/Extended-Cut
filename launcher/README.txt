@@ -44,8 +44,9 @@ Contents
         Windows:     C:\Games\The Punisher (PC) - Costume Launcher
  2. Download the Costume Launcher templates mod from Nexus Mods (shirt backgrounds + outfit pieces) and unpack it
     into the launcher folder's "Costume Library" folder (create it if it is not there).
- 3. Start the launcher (see 4): Steam Deck - "Start Costume Launcher.sh"; Windows - "Start Costume Launcher
-    (Windows).bat". Pick the GAME folder (the one with pun.exe) when it asks. The launcher uses the
+ 3. Start the launcher (see 4): Steam Deck - "Start Costume Launcher.sh"; Windows - "Costume Launcher.exe"
+    (nothing to install) or "Start Costume Launcher (Windows).bat" (needs Python, see 1). Pick the GAME folder
+    (the one with pun.exe) when it asks. The launcher uses the
     "Costume Library" folder inside its own folder by itself - nothing else to pick.
  4. Tab "Parts & Skulls" -> "Add a skull..." -> your skull picture (PNG, transparent background).
  5. On the right (Kit builder): pick the skull, a shirt background and the parts you want -> "Save kit...".
@@ -63,12 +64,16 @@ Contents
 1. WHAT YOU NEED
 ---------------------------------------------------------------------------------------------------------------
 - The Punisher (PC), installed.
-- Python 3 with Pillow and numpy:
+- Python 3 with Pillow and numpy (Windows: NOT needed if you start "Costume Launcher.exe"):
     Steam Deck: nothing to install by hand. The first start of "Start Costume Launcher.sh" sets up its own
                 Python (~/punisher-env) with Pillow and numpy - it needs internet that one time and can take a
                 minute. (python_setup.txt in the launcher folder shows what it did.)
-    Windows:    install Python 3 from python.org (tick "Add python.exe to PATH"), then open a command prompt once:
-                    py -m pip install pillow numpy
+    Windows:    two ways to start the launcher - pick one:
+                a) "Costume Launcher.exe" - nothing to install. Python, Pillow and numpy are built in.
+                b) "Start Costume Launcher (Windows).bat" - uses your own Python. Install Python 3 from python.org
+                   (tick "Add python.exe to PATH") or from the Microsoft Store (no admin rights needed), then
+                   open a command prompt once:
+                       py -m pip install pillow numpy
 - Your own pictures. NO costume art comes with the launcher - you bring the outfits, skulls and shirts.
 
 
@@ -183,7 +188,10 @@ Every folder already holds a short README.txt. A folder or file whose name start
 Steam Deck (Desktop Mode): double-click "Start Costume Launcher.sh".
     If it opens as TEXT instead of running: right-click it -> Properties -> Permissions -> tick "Is executable"
     (or "Allow executing file as program") -> OK, then double-click again. Or right-click -> Run In Konsole.
-Windows: double-click "Start Costume Launcher (Windows).bat" (not launcher.py - that may just open in an editor).
+Windows: double-click "Costume Launcher.exe" (no Python needed), or "Start Costume Launcher (Windows).bat" if you
+installed Python (see 1). Not launcher.py - that may just open in an editor. Keep the .exe in the launcher folder,
+next to launcher.py (it runs the launcher files next to it). The first start of the .exe takes a few seconds.
+If Windows says "Windows protected your PC": click "More info" -> "Run anyway" (the .exe is not signed).
 1. It asks for the GAME folder once (the folder with pun.exe). Remembered in launcher_settings.json.
 2. The library: a new install uses the "Costume Library" folder inside the launcher folder by itself. To use a
    different one, click "Library folder..." (top right). Press "Rescan library" after you add files in your file
@@ -317,7 +325,10 @@ launcher's first backups and would undo other mods' level changes (e.g. Extended
 - A level hangs on loading: switch Smooth blacks off, Apply again.
 - A costume does not show: Check (verify) tells you which textures are really in the game; Rescan library after
   adding files.
-- Send launcher.log (and launcher_error.txt if there is one).
+- Windows, "Costume Launcher.exe" will not start or your antivirus removes it: use "Start Costume Launcher
+  (Windows).bat" with Python instead (see 1), or allow the .exe in your antivirus. If the .exe stops with an
+  error, it writes launcher_crash.txt in the launcher folder.
+- Send launcher.log (and launcher_error.txt / launcher_crash.txt if there is one).
 
 ---------------------------------------------------------------------------------------------------------------
 12. CREDITS
