@@ -117,6 +117,15 @@ The first line of `ExtendedCut.log` says which build you have.
 `plugin/build.bat` (Visual Studio 2022+ with C++, x86) builds `ExtendedCut.asi`; it needs SDL3 3.4.x
 (`set SDL3_DIR=...`). The plugin is loaded by ThirteenAG's Ultimate ASI Loader.
 
+## How this mod was made
+
+The Punisher: Extended Cut is directed, designed and tested by myself (Javi-096), with Claude (Anthropic's AI) as the
+programming partner. Claude wrote most of the code and did most of the reverse engineering - reading the game's
+machine code in Ghidra and comparing every build from the October 2004 PS2 demo to retail on PC, Xbox and PS2.
+Every feature was my call, and every change is tested in the game, on Windows and the Steam Deck, before it ships.
+
+The source code is open in this repository, and every release lists what changed and why (docs/CHANGELOG.txt).
+
 ## Credits and licence
 
 The Extended Cut code and tools are licensed under the **GNU General Public License v3.0 or later** ([LICENSE.txt](LICENSE.txt)): use, change and share them freely - a released mod built on this code must publish its source under the same licence and keep the credits. The licence covers our code only, not the game or its files; Ultimate ASI Loader and SDL3 keep their own licences.
