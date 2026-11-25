@@ -1,5 +1,12 @@
 CHANGELOG
 =========
+0.3.6 (hotfix, Nov 24 2026) - plugin v1.60 (unchanged)
+- FIX (installer): "PermissionError: [Errno 13] Permission denied" with a long error list when the game is inside
+  Program Files (Windows protects it) or still running. Install.exe now checks first: it waits until the game is
+  closed, lists what Windows blocks, offers to start again as administrator, and changes nothing until it can write every file.
+  Tip: a game folder outside Program Files (e.g. C:\Games\The Punisher) also keeps your settings and logs where
+  the game expects them.
+
 0.3.5 (Nov 23 2026) - plugin v1.60
 - FIX: button prompt issues. With PlayStation button prompts the interrogation choice wheel showed a plain grey
   square in the middle instead of the stick picture, so you could not see which way you were pushing. The

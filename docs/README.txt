@@ -28,6 +28,9 @@ file before it touches it, and keeps each original as <file>.ec_original, so you
    a) Windows, easiest: double-click Install.exe, then choose 1 (Install). Python is built in.
       Some antivirus programs distrust any new .exe; CHECKSUMS.txt lists its SHA-256 if you want to verify it,
       or use b) instead.
+      Game inside Program Files (e.g. C:\Program Files (x86)\...): Windows protects that folder. Install.exe
+      notices and offers to start again as administrator (or right-click it -> Run as administrator). Better: move
+      the whole game folder somewhere else (e.g. C:\Games\The Punisher) - settings and logs then stay in it.
    b) Windows, no .exe: double-click Install.bat (needs Python 3). It runs the plain .py scripts in this folder,
       which you can read first.
    c) Steam Deck / Linux (Desktop Mode): right-click install.sh -> Run In Konsole (double-clicking it may only
